@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Installs:
-    - ocrd-keraslm-rate
+    - keraslm-rate
 """
 import codecs
 
@@ -32,7 +32,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'ocrd-keraslm-rate=ocrd_keraslm.scripts.run:cli',
+            'keraslm-rate=ocrd_keraslm.scripts.run:cli',
         ]
     },
 )
