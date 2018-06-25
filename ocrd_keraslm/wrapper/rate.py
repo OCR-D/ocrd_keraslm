@@ -12,7 +12,6 @@ class KerasRate(Processor):
     def __init__(self, *args, **kwargs):
         kwargs['ocrd_tool'] = OCRD_TOOL['tools']['ocrd-keraslm-rate']
         kwargs['version'] = OCRD_TOOL['version']
-        kwargs['input_file_grp'] = 'OCR-D-GT-SEG-WORD'
         super(KerasRate, self).__init__(*args, **kwargs)
 
     def process(self):
