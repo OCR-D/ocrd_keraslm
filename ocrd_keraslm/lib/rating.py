@@ -2,6 +2,7 @@ from keras.utils import to_categorical
 from keras.models import Sequential, load_model
 from keras.layers import Dense
 from keras.layers import LSTM
+from keras.callbacks import EarlyStopping
 from keras.preprocessing.sequence import pad_sequences
 
 import click, numpy, pickle
@@ -69,7 +70,8 @@ class Rater(object):
         self.model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
 
         # fit model
-        self.model.fit(x, y, batch_size=128, epochs=100, verbose=2)
+        early_stopping = EarlyStopping(monitor='val_loss', patience=1, verbose=1)
+        self.model.fit(x, y, batch_size=128, epochs=100, verbose=2, validation_split=0.2, callbacks=[early_stopping])
 
         # set state
         self.status = 1
