@@ -46,7 +46,8 @@ def apply(model, mapping, text):
     else:
         pass
 
-    ratings = rater.rate(in_string)
+    ratings, perplexity = rater.rate(in_string)
+    click.echo(perplexity)
     click.echo(json.dumps(ratings))
 
 if __name__ == '__main__':
