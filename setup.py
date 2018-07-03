@@ -33,6 +33,7 @@ setup(
     entry_points={
         'console_scripts': [
             'keraslm-rate=ocrd_keraslm.scripts.run:cli',
+            'ocrd-keraslm-rate=ocrd_keraslm.wrapper.cli:ocrd_keraslm_rate',
         ]
     },
 )
