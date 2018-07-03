@@ -13,10 +13,12 @@
       "description": "Rate text with keras",
       "parameters": {
         "model": {
-          "type": "string"
+          "type": "string",
+          "required": true
         },
         "mapping": {
-          "type": "string"
+          "type": "string",
+          "required": true
         }
       }
     }
