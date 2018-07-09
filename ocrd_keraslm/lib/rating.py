@@ -24,13 +24,12 @@ class Rater(object):
         self.model = Sequential()
         self.status = 0
         self.length = 5
-        self.mapping = ({},{})
         self.minibatch_size = 128
         self.validation_split = 0.2
     
     def train(self, training_data):
         '''
-        Trains an RNN language model on `training_data` files.
+        Trains an RNN language model on `training_data` files (UTF-8 byte sequences).
         '''
         if self.status != 0:
             self.clear()
@@ -38,19 +37,12 @@ class Rater(object):
         total_size = 0
         max_size = 0
         chars = set([])
-        #
-        # mapping
         with click.progressbar(training_data) as bar:
             for f in bar:
                 text = f.read()
                 size = len(text)
                 total_size += size
                 max_size = max(max_size, size)
-                chars.update(set(text))
-        chars = sorted(list(chars))
-        c_i = dict((c, i) for i, c in enumerate(chars))
-        i_c = dict((i, c) for i, c in enumerate(chars))
-        self.mapping = (c_i, i_c)
 
         steps = 3
         epoch_size = total_size/steps/self.minibatch_size
@@ -77,12 +69,8 @@ class Rater(object):
                         if (len(sequences) % self.minibatch_size == 0 or 
                             i + steps > len(text) - self.length): # last minibatch
                             # vectorization
-                            x = numpy.zeros((self.minibatch_size, self.length, len(self.mapping[0])), dtype=numpy.bool)
-                            y = numpy.zeros((self.minibatch_size, len(self.mapping[0])), dtype=numpy.bool)
-                            for j, sequence in enumerate(sequences):
-                                for t, char in enumerate(sequence):
-                                    x[j, t, c_i[char]] = 1
-                                    y[j, c_i[next_chars[j]]] = 1
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
                             yield (x,y)
                             sequences = []
                             next_chars = []
@@ -91,9 +79,9 @@ class Rater(object):
         # model
         
         # define model # todo: automatically switch to CuDNNLSTM if CUDA GPU is available
-        self.model.add(LSTM(128, input_shape=(self.length, len(self.mapping[0])), return_sequences=True))
+        self.model.add(LSTM(128, input_shape=(self.length, 256), return_sequences=True))
         self.model.add(LSTM(128))
-        self.model.add(Dense(len(self.mapping[0]), activation='softmax'))
+        self.model.add(Dense(256, activation='softmax'))
         self.model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         
         # fit model
@@ -105,21 +93,19 @@ class Rater(object):
     
     def save(self, prefix):
         '''
-        Saves model and mapping.
+        Saves model.
         '''
         
         if self.status:
             self.model.save(u"%s.h5" % prefix)
-            pickle.dump(self.mapping, open(u"%s.map" % prefix, mode='wb'))
     
-    def load(self, mapping, model):
+    def load(self, model):
         '''
-        Loads model and mapping.
+        Loads model.
         '''
         
         # load model
         self.model = load_model(model)
-        self.mapping = pickle.load(open(mapping, mode="rb"))
         self.status = 1
     
     def rate(self, text):
@@ -133,24 +119,28 @@ class Rater(object):
         #                       or by aggregating lattice input)
         # todo: make incremental
         if self.status:
-            x = numpy.zeros((1, self.length, len(self.mapping[0])))
+            x = numpy.zeros((1, self.length, 256))
             entropy = 0
             result = []
+            length = 0
             for c in text:
-                pred = dict(enumerate(self.model.predict(x, verbose=0).tolist()[0]))
-                i = self.mapping[0][c]
-                result.append((c, pred[i]))
-                entropy -= log(pred[i], 2)
-                x = numpy.roll(x, -1, axis=1) # left-shifted by 1
-                x[0,-1] = numpy.eye(len(self.mapping[0]))[i] # one-hot vector for c in last pos
-            return result, pow(2.0, entropy/len(text))
+                p = 1.0
+                for b in c.encode("utf-8"):
+                    pred = dict(enumerate(self.model.predict(x, verbose=0).tolist()[0]))
+                    entropy -= log(pred[b], 2)
+                    length += 1
+                    p *= pred[b]
+                    x = numpy.roll(x, -1, axis=1) # left-shifted by 1
+                    x[0,-1] = numpy.eye(256)[b] # one-hot vector for b in last pos
+                result.append((c, p))
+            return result, pow(2.0, entropy/length)
         else:
             return [], 0
     
     def test(self, test_data):
         '''
         Calculates the perplexity of the character sequences in all `test_data` files
-        according to the current model.
+        (UTF-8 byte sequences) according to the current model.
         '''
 
         total_size = 0
@@ -177,12 +167,8 @@ class Rater(object):
                         if (len(sequences) % self.minibatch_size == 0 or 
                             i + steps > len(text) - self.length): # last minibatch
                             # vectorization
-                            x = numpy.zeros((self.minibatch_size, self.length, len(self.mapping[0])), dtype=numpy.bool)
-                            y = numpy.zeros((self.minibatch_size, len(self.mapping[0])), dtype=numpy.bool)
-                            for j, sequence in enumerate(sequences):
-                                for t, char in enumerate(sequence):
-                                    x[j, t, self.mapping[0][char]] = 1
-                                    y[j, self.mapping[0][next_chars[j]]] = 1
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
                             yield (x,y)
                             sequences = []
                             next_chars = []
