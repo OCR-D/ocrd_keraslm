@@ -17,10 +17,8 @@ class Rater(object):
         Resets rater.
         '''
         
-        from keras.models import Sequential
-
-        self.model = Sequential()
-        self.status = 0 # trained?
+        self.model = None
+        self.status = 0 # empty / compiled / trained?
         
         self.length = 0 # will be overwritten by CLI for train / by load model for rate/test
         self.width = 0 # will be overwritten by CLI for train / by load model for rate/test
@@ -36,9 +34,10 @@ class Rater(object):
         from keras.layers import Dense
         from keras.layers import LSTM, CuDNNLSTM
         from keras import backend as K
+        from keras.models import Sequential
+
+        self.model = Sequential()
         
-        #
-        # model
         length = None if self.variable_length else self.length
         # automatically switch to CuDNNLSTM if CUDA GPU is available:
         has_cuda = K.backend() == 'tensorflow' and K.tensorflow_backend._get_available_gpus()
@@ -59,22 +58,16 @@ class Rater(object):
                                 **args))
         self.model.add(Dense(256, activation='softmax'))
         self.model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+        
+        self.status = 1
     
-    def train(self, data, width, depth, length):
+    def train(self, data):
         '''
         Trains an RNN language model on `data` files (UTF-8 byte sequences).
         '''
         from keras.callbacks import EarlyStopping, ModelCheckpoint
         
-        if self.status != 0:
-            self.clear()
-        self.width = width
-        self.depth = depth
-        self.length = length
-        if self.stateful:
-            self.minibatch_size = self.length # make sure states are consistent with windows after 1 minibatch
-        
-        self.configure()
+        assert self.status > 0 # incremental training is allowed
         
         data = list(data)
         shuffle(data) # random order of files (because generators cannot shuffle within files)
@@ -154,7 +147,7 @@ class Rater(object):
                                  verbose=1, callbacks=callbacks) # todo: make iterator thread-safe and use_multiprocesing=True
         
         # set state
-        self.status = 1
+        self.status = 2
     
     def save(self, filename):
         '''
@@ -162,8 +155,8 @@ class Rater(object):
         (Cannot preserve weights across CPU/GPU implementations or input shape configurations.)
         '''
         
-        if self.status:
-            self.model.save(filename)
+        assert self.status != 0
+        self.model.save(filename)
     
     def load(self, filename):
         '''
@@ -189,24 +182,30 @@ class Rater(object):
             self.variable_length = True
         self.status = 1
 
-    def save2(self, configfilename, weightfilename):
+    def save_config(self, configfilename):
         '''
-        Saves model configuration into `configfilename` and model weights into `weightfilename`.
-        (This preserves weights across CPU/GPU implementations or input shape configurations.)
+        Saves model configuration into `configfilename`.
         '''
         
-        if self.status:
-            config = {'width': self.width, 'depth': self.depth, 'length': self.length, 'stateful': self.stateful, 'variable_length': self.variable_length}
-            pickle.dump(config, open(configfilename, mode='wb'))
-            self.model.save_weights(weightfilename)
+        assert self.status > 0
+        config = {'width': self.width, 'depth': self.depth, 'length': self.length, 'stateful': self.stateful, 'variable_length': self.variable_length}
+        pickle.dump(config, open(configfilename, mode='wb'))
     
-    def load2(self, configfilename, weightfilename):
+    def save_weights(self, weightfilename):
         '''
-        Loads model configuration from `configfilename`, compiles a new model from that, then loads weights into it from `weightfilename`.
+        Saves model weights into `weightfilename`.
         (This preserves weights across CPU/GPU implementations or input shape configurations.)
         '''
         
-        if self.status != 0:
+        assert self.status > 1
+        self.model.save_weights(weightfilename)
+    
+    def load_config(self, configfilename):
+        '''
+        Loads model configuration from `configfilename` and compiles a new model from that.
+        '''
+        
+        if self.status > 0:
             self.clear()
         config = pickle.load(open(configfilename, mode='rb'))
         self.width = config['width']
@@ -214,11 +213,16 @@ class Rater(object):
         self.length = config['length']
         self.stateful = config['stateful']
         self.variable_length = config['variable_length']
-        self.configure()
+    
+    def load_weights(self, weightfilename):
+        '''
+        Loads weights into the compiled model from `weightfilename`.
+        (This preserves weights across CPU/GPU implementations or input shape configurations.)
+        '''
         
         self.model.load_weights(weightfilename)
         
-        self.status = 1
+        self.status = 2
     
     def rate(self, text):
         '''
@@ -230,34 +234,32 @@ class Rater(object):
         # todo: allow graph input (by pruning via history clustering or push forward algorithm;
         #                       or by aggregating lattice input)
         # todo: make incremental
-        if self.status:
-            x = numpy.zeros((1, self.length, 256), dtype=numpy.bool)
-            entropy = 0
-            result = []
-            length = 0
-            self.model.reset_states()
-            for c in text: # could be single characters or words later-on (when applying incrementally or from graph)
-                p = 1.0
-                for b in c.encode("utf-8"):
-                    x_input = x[:,x.any(axis=2)[0]] if self.variable_length else x
-                    if x_input.shape[1] > 0: # to prevent length 0 input
-                        pred = dict(enumerate(self.model.predict(x_input, batch_size=1, verbose=0).tolist()[0]))
-                        entropy -= log(pred[b], 2)
-                        length += 1
-                        p *= pred[b]
-                    x = numpy.roll(x, -1, axis=1) # left-shifted by 1
-                    x[0,-1] = numpy.eye(256, dtype=numpy.bool)[b] # one-hot vector for b in last pos
-                result.append((c, p))
-            return result, pow(2.0, entropy/length)
-        else:
-            return [], 0
+        assert self.status > 1
+        x = numpy.zeros((1, self.length, 256), dtype=numpy.bool)
+        entropy = 0
+        result = []
+        length = 0
+        self.model.reset_states()
+        for c in text: # could be single characters or words later-on (when applying incrementally or from graph)
+            p = 1.0
+            for b in c.encode("utf-8"):
+                x_input = x[:,x.any(axis=2)[0]] if self.variable_length else x
+                if x_input.shape[1] > 0: # to prevent length 0 input
+                    pred = dict(enumerate(self.model.predict(x_input, batch_size=1, verbose=0).tolist()[0]))
+                    entropy -= log(pred[b], 2)
+                    length += 1
+                    p *= pred[b]
+                x = numpy.roll(x, -1, axis=1) # left-shifted by 1
+                x[0,-1] = numpy.eye(256, dtype=numpy.bool)[b] # one-hot vector for b in last pos
+            result.append((c, p))
+        return result, pow(2.0, entropy/length)
     
     def rate_single(self, text):
         '''
         Rates the last character in text according to the model.
         '''
         
-        if self.status :
+        if self.status > 1:
             try:
                 encoded_buffer = [self.mapping[0][c] for c in text[:-1]]
                 x = numpy.zeros((1, self.length, len(self.mapping[0])))
@@ -278,6 +280,7 @@ class Rater(object):
         (UTF-8 byte sequences) according to the current model.
         '''
         
+        assert self.status > 1
         # todo: Since Keras does not allow callbacks within evaluate() / evaluate_generator() / test_loop(),
         #       we cannot reset_states() between input files as we do in train().
         #       Thus we should evaluate each file individually, reset in between, and accumulate losses.
@@ -314,13 +317,10 @@ class Rater(object):
                             sequences = []
                             next_chars = []
         
-        if self.status:
-            loss, accuracy = self.model.evaluate_generator(gen_data(test_data), steps=epoch_size, verbose=1) # todo: make iterator thread-safe and use_multiprocesing=True
-            return exp(loss)
-        else:
-            return 0
+        loss, accuracy = self.model.evaluate_generator(gen_data(test_data), steps=epoch_size, verbose=1) # todo: make iterator thread-safe and use_multiprocesing=True
+        return exp(loss)
     
-        
+
 class ResetStatesCallback(Callback):
     '''Callback to be called by `fit_generator()` or even `evaluate_generator()`:
 
