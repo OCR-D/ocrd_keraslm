@@ -10,12 +10,13 @@ def cli():
     pass
 
 @cli.command()
-@click.option('-m', '--model', default="model.h5", type=click.Path(dir_okay=False, writable=True))
+@click.option('-m', '--model', default="model.weights.h5", type=click.Path(dir_okay=False, writable=True))
+@click.option('-c', '--config', default="model.config.pkl", type=click.Path(dir_okay=False, writable=True))
 @click.option('-w', '--width', default=128, type=click.IntRange(min=1, max=9128))
 @click.option('-d', '--depth', default=2, type=click.IntRange(min=1, max=10))
 @click.option('-l', '--length', default=5, type=click.IntRange(min=1, max=500))
 @click.argument('data', nargs=-1, type=click.File('rb'))
-def train(model, width, depth, length, data):
+def train(model, config, width, depth, length, data):
     """Train a language model from `data` files,
        with `width` nodes per hidden layer,
        with `depth` hidden layers,
@@ -27,17 +28,22 @@ def train(model, width, depth, length, data):
     rater.train(data, width, depth, length)
     
     # save model and dicts
-    rater.save(model)
+    #rater.save(model)
+    rater.save2(config, model)
 
 @cli.command()
 @click.option('-m', '--model', required=True, type=click.Path(dir_okay=False, exists=True))
+@click.option('-c', '--config', required=True, type=click.Path(dir_okay=False, exists=True))
 @click.argument('text', type=click.STRING) # todo: create custom click.ParamType for graph/FST input
-def apply(model, text):
+def apply(model, config, text):
     """Apply a language model to `text` string"""
     
     # load model
     rater = lib.Rater()
-    rater.load(model)
+    if rater.stateful:
+        rater.minibatch_size = 1 # override necessary before compilation
+    #rater.load(model)
+    rater.load2(config, model)
     
     if text:
         if text[0] == u"-":
@@ -51,13 +57,15 @@ def apply(model, text):
 
 @cli.command()
 @click.option('-m', '--model', required=True, type=click.Path(dir_okay=False, exists=True))
+@click.option('-c', '--config', required=True, type=click.Path(dir_okay=False, exists=True))
 @click.argument('data', nargs=-1, type=click.File('rb'))
-def test(model, data):
+def test(model, config, data):
     """Apply a language model to `data` files"""
     
     # load model
     rater = lib.Rater()
-    rater.load(model)
+    #rater.load(model)
+    rater.load2(config, model)
     
     # evaluate on files
     perplexity = rater.test(data)
