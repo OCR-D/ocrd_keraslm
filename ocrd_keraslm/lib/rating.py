@@ -252,6 +252,26 @@ class Rater(object):
         else:
             return [], 0
     
+    def rate_single(self, text):
+        '''
+        Rates the last character in text according to the model.
+        '''
+        
+        if self.status :
+            try:
+                encoded_buffer = [self.mapping[0][c] for c in text[:-1]]
+                x = numpy.zeros((1, self.length, len(self.mapping[0])))
+                encoded = pad_sequences([encoded_buffer], maxlen=self.length, truncating='pre')
+                for t, i in enumerate(encoded[0]):
+                    x[0, t, i] = 1.
+                pred = dict(enumerate(self.model.predict(x, verbose=0).tolist()[0]))
+                i = self.mapping[0][text[-1]]
+                return pred[i]
+            except:
+                return 0.0
+        else:
+            return 0.0
+    
     def test(self, test_data):
         '''
         Calculates the perplexity of the character sequences in all `test_data` files
@@ -299,7 +319,8 @@ class Rater(object):
             return exp(loss)
         else:
             return 0
-
+    
+        
 class ResetStatesCallback(Callback):
     '''Callback to be called by `fit_generator()` or even `evaluate_generator()`:
 
@@ -322,4 +343,3 @@ class ResetStatesCallback(Callback):
         if (self.params['do_validation'] and batch >= self.params['steps']-1):
             # in fit_generator just before evaluate_generator
             self.model.reset_states()
-
