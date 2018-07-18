@@ -1,0 +1,26 @@
+{
+  "git_url": "https://github.com/OCR-D/ocrd_keraslm",
+  "version": "0.0.1",
+  "tools": {
+    "ocrd-keraslm-rate": {
+      "executable": "ocrd-keraslm-rate",
+      "categories": [
+        "Text recognition and optimization"
+      ],
+      "steps": [
+        "recognition/text-recognition"
+      ],
+      "description": "Rate text with keras",
+      "parameters": {
+        "model": {
+          "type": "string",
+          "required": true
+        },
+        "mapping": {
+          "type": "string",
+          "required": true
+        }
+      }
+    }
+  }
+}
