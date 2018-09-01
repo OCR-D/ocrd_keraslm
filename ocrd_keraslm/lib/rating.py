@@ -26,7 +26,7 @@ class Rater(object):
         self.length = 0 # will be overwritten by CLI for train / by load model for rate/test
         
         self.variable_length = False # also train on partially filled windows
-        self.stateful = False # keep states across batches within one text
+        self.stateful = True # keep states across batches within one text
         self.minibatch_size = 128 # will be overwritten by length if stateful
         self.validation_split = 0.2 # fraction of training data to use for validation (generalization control)
     
@@ -111,7 +111,7 @@ class Rater(object):
                 for f in files:
                     f.seek(0)
                     if self.stateful:
-                        reset_cb.reset()
+                        reset_cb.reset(f.name)
                     text = f.read()
                     # encode
                     sequences = []
@@ -329,17 +329,23 @@ class ResetStatesCallback(Callback):
     '''
     def __init__(self):
         self.eof = False
+        self.here = ''
+        self.next = ''
     
-    def reset(self):
+    def reset(self, where):
         self.eof = True
+        self.next = where
     
     def on_batch_begin(self, batch, logs={}):
         if self.eof:
             # between training files
             self.model.reset_states()
             self.eof = False
+            self.here = self.next
     
     def on_batch_end(self, batch, logs={}):
+        if logs.get('loss') > 25:
+            print('huge loss in', self.here, 'at', batch)
         if (self.params['do_validation'] and batch >= self.params['steps']-1):
             # in fit_generator just before evaluate_generator
             self.model.reset_states()

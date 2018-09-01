@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
+from os.path import isfile
 import click, sys, json
 
 from ocrd_keraslm import lib
@@ -25,6 +26,11 @@ def train(model, config, width, depth, length, data):
     
     # train
     rater = lib.Rater()
+    incremental = False
+    if isfile(model) and isfile(config):
+        rater.load_config(config)
+        if rater.width == width and rater.depth == depth:
+            incremental = True
     rater.width = width
     rater.depth = depth
     rater.length = length
@@ -32,6 +38,9 @@ def train(model, config, width, depth, length, data):
         rater.minibatch_size = rater.length # make sure states are consistent with windows after 1 minibatch
     
     rater.configure()
+    if incremental:
+        print ('loading weights for incremental training')
+        rater.load_weights(model)
     rater.train(data)
     
     # save model and dicts
