@@ -227,7 +227,8 @@ class Rater(object):
     def rate(self, text):
         '''
         Calculates probabilities (individually) and perplexity (accumulated)
-        of the character sequence in `text` according to the current model.
+        of the character sequence in `text` according to the current model
+        (predicting one by one).
         '''
         
         # perplexity calculation is a lot slower that way than via tensor metric, cf. test()
@@ -254,6 +255,8 @@ class Rater(object):
             result.append((c, p))
         return result, pow(2.0, entropy/length)
     
+    # dysfunctional now
+    # only makes sense if we can run this incrementally - perhaps by adding initial_state param and returning final state?
     def rate_single(self, text):
         '''
         Rates the last character in text according to the model.
@@ -273,6 +276,57 @@ class Rater(object):
                 return 0.0
         else:
             return 0.0
+    
+    def rate_once(self, textstring):
+        '''
+        Calculates the probability of the character sequence in `textstring`
+        according to the current model (predicting all at once).
+        '''
+        
+        assert self.status > 1
+        text = textstring.encode("utf-8") # byte sequence
+        total_size = len(text)
+        steps = 1
+        epoch_size = ceil((total_size-1)/self.minibatch_size)
+        
+        # data preparation
+        def gen_data(text):
+            # encode
+            while True:
+                sequences = []
+                for i in range(1, len(text), steps): # sequence must not be length zero with tensorflow
+                    if i < self.length:
+                        if self.variable_length:
+                            # partial window (needs interim minibatch size 1)
+                            sequences.append(text[0:i])
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            yield x
+                            sequences = []
+                        else:
+                            # zero padding
+                            sequences.append(b'\0' * (self.length - i) + text[0:i])
+                    else:
+                        sequences.append(text[i - self.length: i])
+                    if (len(sequences) % self.minibatch_size == 0 or 
+                        i + steps >= len(text)): # last minibatch
+                        # vectorization
+                        x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                        yield x
+                        sequences = []
+                break
+        
+        preds = self.model.predict_generator(gen_data(text), steps=epoch_size, verbose=1) # todo: make iterator thread-safe and use_multiprocesing=True
+        # get predictions for true symbols (bytes)
+        probs = [1/256]+preds[range(len(text)-1),bytearray(text)[1:]].tolist() # all symbols but first byte (uniform prediction)
+        # get predictions for true symbols (characters)
+        cprobs = [1.0] * len(textstring)
+        j = 0
+        for (i,c) in enumerate(textstring):
+            for k in range(len(c.encode("utf-8"))):
+                cprobs[i] *= probs[j]
+                j += 1
+        assert j == len(text)
+        return cprobs
     
     def test(self, test_data):
         '''
