@@ -16,3 +16,5 @@ deps:
 # pip install -e .
 install:
 	pip install -e .
+
+.PHONY: help deps install
