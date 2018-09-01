@@ -294,7 +294,7 @@ class Rater(object):
                 size = len(text)
                 total_size += size
         steps = 1
-        epoch_size = ceil(total_size/self.minibatch_size)
+        epoch_size = ceil((total_size-len(test_data))/self.minibatch_size)
         
         # data preparation
         def gen_data(files):
@@ -305,11 +305,24 @@ class Rater(object):
                     text = f.read()
                     sequences = []
                     next_chars = []
-                    for i in range(0, len(text) - self.length, steps):
-                        sequences.append(text[i: i + self.length])
-                        next_chars.append(text[i + self.length])
+                    for i in range(1, len(text), steps): # sequence must not be length zero with tensorflow
+                        next_chars.append(text[i])
+                        if i < self.length:
+                            if self.variable_length:
+                                # partial window (needs interim minibatch size 1)
+                                sequences.append(text[0:i])
+                                x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
+                                yield (x,y)
+                                sequences = []
+                                next_chars = []
+                            else:
+                                # zero padding
+                                sequences.append(b'\0' * (self.length - i) + text[0:i])
+                        else:
+                            sequences.append(text[i - self.length: i])
                         if (len(sequences) % self.minibatch_size == 0 or 
-                            i + steps > len(text) - self.length): # last minibatch
+                            i + steps > len(text)): # last minibatch
                             # vectorization
                             x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
                             y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]

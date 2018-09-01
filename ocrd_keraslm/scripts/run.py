@@ -68,6 +68,8 @@ def apply(model, config, text):
     ratings, perplexity = rater.rate(text)
     click.echo(perplexity)
     click.echo(json.dumps(ratings, ensure_ascii=False))
+    #probs = rater.rate_once(text)
+    #click.echo(json.dumps(probs))
 
 @cli.command(short_help='get overall perplexity from language model')
 @click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
