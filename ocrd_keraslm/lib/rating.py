@@ -4,18 +4,30 @@ from random import shuffle
 from math import log, exp, ceil, floor
 
 class Rater(object):
+    '''A character-level RNN language model for rating text.
+    
+    Uses Keras to define, compile, train, run and test an RNN
+    (LSTM) language model on the (UTF-8) byte level. The model's
+    topology (layers depth, per-layer width, window length) can
+    be controlled before training.
+
+    To be used by stand-alone CLI (`scripts.train` for training,
+    `scripts.apply` for prediction, `scripts.test` for evaluation),
+    or OCR-D processing (`wrapper.ocrd_keraslm_rate`). 
+
+    Interfaces:
+    - `Rater.train`/`scripts.train` : file handles of byte sequences
+    - `Rater.test`/`scripts.test` : file handles of byte sequences
+    - `Rater.rate`/`scripts.apply` : character string
+    - `Rater.rate_once`/`wrapper.ocrd_keraslm_rate` : character string
+    - `Rater.rate_single`/`scripts.generate` : alternative list of bytes and states
+    '''
     
     def __init__(self):
-        '''
-        The constructor.
-        '''
-        
         self.clear()
     
     def clear(self):
-        '''
-        Resets rater.
-        '''
+        '''Reset model and set all parameters to their defaults.'''
         
         self.model = None
         self.status = 0 # empty / compiled / trained?
@@ -26,48 +38,72 @@ class Rater(object):
         self.length = 0 # will be overwritten by CLI for train / by load model for rate/test
         
         self.variable_length = False # also train on partially filled windows
-        self.stateful = True # keep states across batches within one text
+        self.stateful = True # keep states across batches within one text (implicit state transfer)
         self.minibatch_size = 128 # will be overwritten by length if stateful
         self.validation_split = 0.2 # fraction of training data to use for validation (generalization control)
+        
+        self.incremental = False # whether compiled with additional (initial) input state and (final) output state (explicit state transfer)
     
     def configure(self):
-        from keras.layers import Dense
+        '''Define and compile model for the given parameters.'''
+        from keras.layers import Dense, Input
         from keras.layers import LSTM, CuDNNLSTM
         from keras import backend as K
-        from keras.models import Sequential
+        from keras.models import Model
 
-        self.model = Sequential()
-        
         length = None if self.variable_length else self.length
         # automatically switch to CuDNNLSTM if CUDA GPU is available:
         has_cuda = K.backend() == 'tensorflow' and K.tensorflow_backend._get_available_gpus()
         print('using', 'GPU' if has_cuda else 'CPU', 'LSTM implementation to compile',
-              'stateful' if self.stateful else 'stateless', 'model of depth',
-              self.depth, 'width', self.width,'length', self.length)
+              'stateful' if self.stateful else 'stateless',
+              'incremental' if self.incremental else 'contiguous',
+              'model of depth', self.depth, 'width', self.width, 'length', self.length)
         lstm = CuDNNLSTM if has_cuda else LSTM
-        for i in range(self.depth):
+        if self.stateful:
+            input_args = {'batch_shape': (self.minibatch_size, length, 256)} # batch size must be constant
+        elif self.incremental:
+            states_input_args = {'shape': (self.width,)}
+            model_states_input = []
+            model_states_output = []
+            input_args = {'shape': (1, 256)} # batch size not fixed
+        else:
+            input_args = {'shape': (length, 256)} # batch size not fixed (e.g. different between training and prediction)
+        model_input = Input(**input_args)
+        model_output = model_input # init layer loop
+        for i in range(self.depth): # layer loop
             args = {'return_sequences': (i+1 < self.depth), 'stateful': self.stateful}
             if not has_cuda:
                 args['recurrent_activation'] = 'sigmoid' # instead of default 'hard_sigmoid' which deviates from CuDNNLSTM
-            if i == 0:
-                if self.stateful:
-                    args['batch_input_shape'] = (self.minibatch_size, length, 256) # batch size must be constant
-                else:
-                    args['input_shape'] = (length, 256) # batch size not fixed (e.g. different between training and prediction)
-            self.model.add(lstm(self.width,
-                                **args))
-        self.model.add(Dense(256, activation='softmax'))
+            if self.incremental:
+                # incremental prediction needs additional inputs and outputs for state (h,c):
+                states = [Input(**states_input_args), Input(**states_input_args)]
+                model_states_input.extend(states)
+                model_output, state_h, state_c = lstm(self.width, return_state = True, **args)(model_output, initial_state = states)
+                model_states_output.extend([state_h, state_c])
+            else:
+                model_output = lstm(self.width, **args)(model_output)
+        model_output = Dense(256, activation='softmax')(model_output)
+        if self.incremental:
+            self.model = Model([model_input] + model_states_input, [model_output] + model_states_output)
+        else:
+            self.model = Model(model_input, model_output)            
         self.model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         
         self.status = 1
     
     def train(self, data):
-        '''
-        Trains an RNN language model on `data` files (UTF-8 byte sequences).
+        '''Train model on text files.
+        
+        Pass the UTF-8 byte sequences in all `data` files to the loop
+        training model weights with stochastic gradient descent. 
+        It will open file by file, repeating over the complete set (epoch)
+        as long as validation error does not increase in between (early stopping).
+        Validate on a random fraction of the file set automatically separated before.
         '''
         from keras.callbacks import EarlyStopping, ModelCheckpoint
         
         assert self.status > 0 # incremental training is allowed
+        assert self.incremental == False # no explicit state transfer
         
         data = list(data)
         shuffle(data) # random order of files (because generators cannot shuffle within files)
@@ -150,8 +186,7 @@ class Rater(object):
         self.status = 2
     
     def save(self, filename):
-        '''
-        Saves model into `filename`.
+        '''Save model into `filename`.
         (Cannot preserve weights across CPU/GPU implementations or input shape configurations.)
         '''
         
@@ -159,8 +194,7 @@ class Rater(object):
         self.model.save(filename)
     
     def load(self, filename):
-        '''
-        Loads model from `filename`.
+        '''Load model from `filename`.
         (Cannot preserve weights across CPU/GPU implementations or input shape configurations.)
         '''
         
@@ -183,8 +217,9 @@ class Rater(object):
         self.status = 1
 
     def save_config(self, configfilename):
-        '''
-        Saves model configuration into `configfilename`.
+        '''Save parameters from configuration.
+
+        Save configured model parameters into `configfilename`.
         '''
         
         assert self.status > 0
@@ -192,8 +227,9 @@ class Rater(object):
         pickle.dump(config, open(configfilename, mode='wb'))
     
     def save_weights(self, weightfilename):
-        '''
-        Saves model weights into `weightfilename`.
+        '''Save weights of the trained model.
+
+        Save trained model weights into `weightfilename`.
         (This preserves weights across CPU/GPU implementations or input shape configurations.)
         '''
         
@@ -201,8 +237,9 @@ class Rater(object):
         self.model.save_weights(weightfilename)
     
     def load_config(self, configfilename):
-        '''
-        Loads model configuration from `configfilename` and compiles a new model from that.
+        '''Load parameters to prepare configuration/compilation.
+
+        Load model configuration from `configfilename`.
         '''
         
         if self.status > 0:
@@ -215,8 +252,9 @@ class Rater(object):
         self.variable_length = config['variable_length']
     
     def load_weights(self, weightfilename):
-        '''
-        Loads weights into the compiled model from `weightfilename`.
+        '''Load weights into the configured/compiled model.
+
+        Load weights from `weightfilename` into the compiled and configured model.
         (This preserves weights across CPU/GPU implementations or input shape configurations.)
         '''
         
@@ -225,17 +263,18 @@ class Rater(object):
         self.status = 2
     
     def rate(self, text):
-        '''
-        Calculates probabilities (individually) and perplexity (accumulated)
+        '''Predict probabilities from model one by one.
+
+        Calculate probabilities (individually) and perplexity (accumulated)
         of the character sequence in `text` according to the current model
         (predicting one by one).
+
+        Return a list of character-probability tuples, and the overall perplexity.
         '''
         
         # perplexity calculation is a lot slower that way than via tensor metric, cf. test()
-        # todo: allow graph input (by pruning via history clustering or push forward algorithm;
-        #                       or by aggregating lattice input)
-        # todo: make incremental
         assert self.status > 1
+        assert self.incremental == False # no explicit state transfer
         x = numpy.zeros((1, self.length, 256), dtype=numpy.bool)
         entropy = 0
         result = []
@@ -254,36 +293,57 @@ class Rater(object):
                 x[0,-1] = numpy.eye(256, dtype=numpy.bool)[b] # one-hot vector for b in last pos
             result.append((c, p))
         return result, pow(2.0, entropy/length)
-    
-    # dysfunctional now
-    # only makes sense if we can run this incrementally - perhaps by adding initial_state param and returning final state?
-    def rate_single(self, text):
-        '''
-        Rates the last character in text according to the model.
-        '''
-        
-        if self.status > 1:
-            try:
-                encoded_buffer = [self.mapping[0][c] for c in text[:-1]]
-                x = numpy.zeros((1, self.length, len(self.mapping[0])))
-                encoded = pad_sequences([encoded_buffer], maxlen=self.length, truncating='pre')
-                for t, i in enumerate(encoded[0]):
-                    x[0, t, i] = 1.
-                pred = dict(enumerate(self.model.predict(x, verbose=0).tolist()[0]))
-                i = self.mapping[0][text[-1]]
-                return pred[i]
-            except:
-                return 0.0
-        else:
-            return 0.0
-    
-    def rate_once(self, textstring):
-        '''
-        Calculates the probability of the character sequence in `textstring`
-        according to the current model (predicting all at once).
+
+    def rate_single(self, candidates, initial_states):
+        '''Predict probability from model, passing initial and final state.
+
+        Calculate the output probability distribution for a single input byte 
+        incrementally according to the current model. Do so in parallel for 
+        any number of hypotheses (i.e. batch size), identified by list position: 
+        For `candidates` hypotheses with their `initial_states`, return a tuple of 
+        their probabilities and their final states (for the next run).
+
+        Return a list of probability arrays and of final states.
+
+        (To be called by an adapter tracking history paths and input alternatives,
+         combining them up to a maximum number of best running candidates, i.e. beam.
+         See `scripts.generate` and `wrapper.ocrd_keraslm_rate` and `lib.Node`.)
+        (Requires the model to be compiled in an incremental configuration.)
         '''
         
         assert self.status > 1
+        assert self.stateful == False # no implicit state transfer
+        assert self.incremental == True # only explicit state transfer
+        # todo: allow graph input (by pruning via history clustering or push forward algorithm;
+        #                       or by aggregating lattice input)
+        assert len(candidates) == len(initial_states)
+        n = len(candidates)
+        # each initial_states[i] is a layer list (h1,c1,h2,c2,...) of state vectors
+        # thus, each layer is a single input (and output) in addition to normal input (and output)
+        # for batch processing, all hypotheses must be passed together:
+        states_input = [numpy.vstack([initial_state[layer] for initial_state in initial_states]) for layer in range(0,self.depth*2)] # stack layers across batch (h+c per layer)
+        x = numpy.expand_dims(numpy.eye(256, dtype=numpy.bool)[candidates], axis=1) # one-hot vector for all bytes; add time dimension
+        output = self.model.predict_on_batch([x] + states_input)
+        probs_output = output[0] # actually we need a (hypo) list of (score) vectors
+        states_output = list(output[1:]) # from (layers) tuple
+        preds = []
+        final_states = []
+        for i in range(0,n):
+            preds.append(probs_output[i,:])
+            final_states.append([layer[i:i+1] for layer in states_output])
+        return preds, final_states
+    
+    def rate_once(self, textstring):
+        '''Predict probabilities from model all at once.
+
+        Calculate the probabilities of the character sequence in `textstring`
+        according to the current model (predicting all at once).
+
+        Return a list of probabilities (one per character/codepoint).
+        '''
+        
+        assert self.status > 1
+        assert self.incremental == False # no explicit state transfer
         text = textstring.encode("utf-8") # byte sequence
         total_size = len(text)
         steps = 1
@@ -329,12 +389,16 @@ class Rater(object):
         return cprobs
     
     def test(self, test_data):
-        '''
-        Calculates the perplexity of the character sequences in all `test_data` files
-        (UTF-8 byte sequences) according to the current model.
+        '''Evaluate model on `test_data` files.
+
+        Calculate the perplexity of the UTF-8 byte sequences in 
+        all `test_data` files according to the current model.
+
+        Return the overall perplexity.
         '''
         
         assert self.status > 1
+        assert self.incremental == False # no explicit state transfer
         # todo: Since Keras does not allow callbacks within evaluate() / evaluate_generator() / test_loop(),
         #       we cannot reset_states() between input files as we do in train().
         #       Thus we should evaluate each file individually, reset in between, and accumulate losses.
@@ -389,10 +453,11 @@ class Rater(object):
     
 
 class ResetStatesCallback(Callback):
-    '''Callback to be called by `fit_generator()` or even `evaluate_generator()`:
-
-       do `model.reset_states()` whenever generator sees EOF (on_batch_begin with self.eof),
-       and between training and validation (on_batch_end with batch>=steps_per_epoch-1)
+    '''Keras callback for stateful models to reset state between files.
+    
+    Callback to be called by `fit_generator()` or even `evaluate_generator()`:
+    do `model.reset_states()` whenever generator sees EOF (on_batch_begin with self.eof),
+    and between training and validation (on_batch_end with batch>=steps_per_epoch-1).
     '''
     def __init__(self):
         self.eof = False
@@ -416,3 +481,55 @@ class ResetStatesCallback(Callback):
         if (self.params['do_validation'] and batch >= self.params['steps']-1):
             # in fit_generator just before evaluate_generator
             self.model.reset_states()
+
+            
+class Node(object):
+    '''One node in a tree of textual alternatives for beam search.
+    
+    Each node has a parent attribute:
+    - `parent`: previous node in tree
+    and 3 content attributes:
+    - `value`: byte at that position in the sequence
+    - `state`: LM state vectors representing the past sequence
+    - `extras`: UTF-8 incremental decoder state after value
+    as well as a score attribute:
+    - `cum_cost`: cumulative LM score of sequence after value
+    and two convenience attributes:
+    - `length`: length of sequence (number of nodes/bytes) starting from root
+    - `_sequence`: list of nodes in the sequence
+
+    This data structure is needed for for beam search of best paths.'''
+    
+    def __init__(self, parent, state, value, cost, extras):
+        super(Node, self).__init__()
+        self.value = value # byte
+        self.parent = parent # parent Node, None for root
+        self.state = state # list of recurrent hidden layers states (h and c for each layer)
+        self.cum_cost = parent.cum_cost + cost if parent else cost
+        self.length = 1 if parent is None else parent.length + 1
+        self.extras = extras # UTF-8 decoder state
+        self._sequence = None
+        #print('added node', bytes([n.value for n in self.to_sequence()]).decode("utf-8", "ignore"))
+    
+    def to_sequence(self):
+        """Return a sequence of nodes from root to current node."""
+        if not self._sequence:
+            self._sequence = []
+            current_node = self
+            while current_node:
+                self._sequence.insert(0, current_node)
+                current_node = current_node.parent
+        return self._sequence
+    
+    def __lt__(self, other):
+        return self.cum_cost < other.cum_cost
+    def __le__(self, other):
+        return self.cum_cost <= other.cum_cost
+    def __eq__(self, other):
+        return self.cum_cost == other.cum_cost
+    def __ne__(self, other):
+        return self.cum_cost != other.cum_cost
+    def __gt__(self, other):
+        return self.cum_cost > other.cum_cost
+    def __ge__(self, other):
+        return self.cum_cost >= other.cum_cost
