@@ -119,7 +119,7 @@ def generate(model, config, number, context):
     rater.load_weights(model)
 
     # initial state
-    context_states = [[numpy.zeros((rater.width), dtype=numpy.float) for n in range(0,rater.depth*2)]] # h+c per layer, but only 1 hypothesis
+    context_states = [None]
     # context (to get correct initial state)
     context_bytes = context.encode("utf-8")
     for b in context_bytes[:-1]: # all but last byte

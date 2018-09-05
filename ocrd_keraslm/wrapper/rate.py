@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 from math import log
+from bisect import insort_left
 
 from ocrd import Processor, MIMETYPE_PAGE
 from ocrd.utils import getLogger, concat_padded, xywh_from_points, points_from_xywh
@@ -10,6 +11,11 @@ from ocrd.model.ocrd_page_generateds import MetadataItemType, LabelsType, LabelT
 from ocrd_keraslm import lib
 
 logger = getLogger('processor.KerasRate')
+
+CHOICE_THRESHOLD_NUM = 3 # maximum number of choices to try per element
+CHOICE_THRESHOLD_CONF = 0.2 # maximum score drop from best choice to try per element
+BEAM_WIDTH = 100 # maximum number of paths to consider during search
+MAX_ELEMENTS = 500 # maximum number of lower level elements embedded within each element (for word/glyph iterators)
 
 class KerasRate(Processor):
     
@@ -25,6 +31,10 @@ class KerasRate(Processor):
         if self.rater.stateful: # override necessary before compilation: 
             self.rater.length = 1 # allow single-sample batches
             self.rater.minibatch_size = self.rater.length # make sure states are consistent with windows after 1 minibatch
+        if self.parameter['alternative_decoding']:
+            # override:
+            self.rater.stateful = False # no implicit state transfer
+            self.rater.incremental = True # but explicit state transfer
         self.rater.configure()
         self.rater.load_weights(self.parameter['weight_file'])
     
@@ -59,11 +69,11 @@ class KerasRate(Processor):
                 if level == 'region':
                     logger.debug("Getting text in region '%s'", region.id)
                     if not first_region:
-                        text.append(TextEquivType(Unicode=u'\n')) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                        text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
                     first_region = False
                     textequivs = region.get_TextEquiv()
                     if textequivs:
-                        text.append(textequivs[0]) # only 1-best for now (otherwise we need to do beam search and return paths)
+                        text.append((region, filter_choices(textequivs)))
                     else:
                         logger.warn("Region '%s' contains no text results", region.id)
                     continue
@@ -75,11 +85,11 @@ class KerasRate(Processor):
                     if level == 'line':
                         logger.debug("Getting text in line '%s'", line.id)
                         if not first_line or not first_region:
-                            text.append(TextEquivType(Unicode=u'\n')) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                            text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
                         first_line = False
                         textequivs = line.get_TextEquiv()
                         if textequivs:
-                            text.append(textequivs[0]) # only 1-best for now (otherwise we need to do beam search and return paths)
+                            text.append((line, filter_choices(textequivs)))
                         else:
                             logger.warn("Line '%s' contains no text results", line.id)
                         continue
@@ -91,13 +101,13 @@ class KerasRate(Processor):
                         if level == 'word':
                             logger.debug("Getting text in word '%s'", word.id)
                             if not first_word:
-                                text.append(TextEquivType(Unicode=u' ')) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                                text.append((None, [TextEquivType(Unicode=u' ')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
                             elif not first_line or not first_region:
-                                text.append(TextEquivType(Unicode=u'\n')) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                                text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
                             first_word = False
                             textequivs = word.get_TextEquiv()
                             if textequivs:
-                                text.append(textequivs[0]) # only 1-best for now (otherwise we need to do beam search and return paths)
+                                text.append((word, filter_choices(textequivs)))
                             else:
                                 logger.warn("Word '%s' contains no text results", word.id)
                             continue
@@ -117,7 +127,7 @@ class KerasRate(Processor):
                                                         Coords=CoordsType(points_from_xywh(xywh))) # empty box
                                 word.insert_Glyph_at(0, space_glyph) # add a pseudo glyph in annotation
                             else:
-                                text.append(space_textequiv) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                                text.append((None, [space_textequiv])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
                         glyphs = word.get_Glyph()
                         if not glyphs:
                             logger.warn("Word '%s' contains no glyphs", word.id)
@@ -125,28 +135,82 @@ class KerasRate(Processor):
                             logger.debug("Getting text in glyph '%s'", glyph.id)
                             textequivs = glyph.get_TextEquiv()
                             if textequivs:
-                                text.append(textequivs[0]) # only 1-best for now (otherwise we need to do beam search and return paths)
+                                text.append((glyph, filter_choices(textequivs)))
                             else:
                                 logger.warn("Glyph '%s' contains no text results", glyph.id)
                         first_word = False
                     first_line = False
                 first_region = False
-            textstring = u''.join(te.Unicode for te in text) # same length as text
-            logger.debug("Rating %d characters", len(textstring))
-            confidences = self.rater.rate_once(textstring)
-            avg = sum(confidences)/len(confidences)
-            ent = sum([-log(p, 2) for p in confidences])/len(confidences)
-            ppl = pow(2.0, ent) # character level
-            ppll = pow(2.0, ent * len(confidences)/len(text)) # textequiv level
-            logger.debug("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # char need not always equal glyph!
-            i = 0
-            for textequiv in text:
-                j = len(textequiv.Unicode)
-                conf = sum(confidences[i:i+j])/j
-                textequiv.set_conf(conf) # or multiply to existing value?
-                i += j
-            if i != len(confidences):
-                logger.err("Input text length and output scores length are off by %d characters", i-len(confidences))
+            if self.parameter['alternative_decoding']:
+                logger.info("Rating %d elements including its alternatives", len(text))
+                # initial state; todo: pass from previous page
+                next_fringe = [lib.Node(parent=None, state=None, value=b'\n'[0], cost=0.0, extras=None)]
+                for element in text: # tuple of reference and list of its alternative textequivs
+                    logger.debug("Rating '%s', combining %d new inputs with %d existing paths", element[0].id if element[0] else "space", len(element[1]), len(next_fringe))
+                    fringe = next_fringe
+                    next_fringe = []
+                    for node in fringe:
+                        new_nodes = [lib.Node(parent=node, state=node.state, value=node.value, cost=0.0, extras=(element[0],textequiv.index)) for textequiv in element[1]] # copies of node (keeping value+state until prediction)
+                        alternatives = [textequiv.Unicode.encode("utf-8") for textequiv in element[1]] # byte sequences
+                        for i in range(MAX_ELEMENTS): # accumulate states and costs of all alternatives (of different length) in node
+                            updates = [j for j in range(len(element[1])) if i<len(alternatives[j])] # indices to update
+                            if updates == []:
+                                break
+                            preds, states = self.rater.rate_single([new_nodes[u].value for u in updates], [new_nodes[u].state for u in updates])
+                            for j, (new_node, alternative) in enumerate([(new_nodes[u], alternatives[u]) for u in updates]):
+                                new_node.value = alternative[i]
+                                new_node.state = states[j]
+                                new_node.cum_cost += -log(max(preds[j][new_node.value], 1e-99), 2)
+                        for new_node in new_nodes:
+                            insort_left(next_fringe, new_node) # insert sorted by cumulative costs
+                            # todo: incorporate input confidences, too (weighted product or as input into LM)
+                    # todo: history clustering for pruning paths by joining similar nodes (instead of neglecting costly nodes)
+                    #logger.debug("Shrinking %d paths to best %d", len(next_fringe), BEAM_WIDTH)
+                    next_fringe = next_fringe[:BEAM_WIDTH] # keep best paths (equals batch size)
+                best = next_fringe[0] # best-scoring path
+                best_len = 0
+                for node in best.to_sequence():
+                    if not node.parent:
+                        continue # ignore root node
+                    element = node.extras[0]
+                    if element: # not just space
+                        textequivs = element.get_TextEquiv()
+                        try:
+                            textequiv = next(te for te in textequivs if te.index == node.extras[1])
+                            element.set_TextEquiv([textequiv]) # delete others
+                            textequiv_len = len(textequiv.Unicode.encode("utf-8"))
+                            best_len += textequiv_len
+                            textequiv.set_conf(pow(2.0, -(node.cum_cost-node.parent.cum_cost)/textequiv_len)) # average probability
+                            #print(textequiv.Unicode, end='')
+                        except StopIteration:
+                            logger.err("TextEquiv index %d not found at element '%s'", node.extras[1], element.id)
+                    else:
+                        best_len += 1
+                        #print(bytes([node.value]).decode("utf-8"), end='')
+                #print('')
+                ent = best.cum_cost/best_len
+                avg = pow(2.0, -ent)
+                ppl = pow(2.0, ent) # byte level
+                ppll = pow(2.0, ent * best_len/best.length) # textequiv level (including spaces/newlines)
+                logger.info("avg: %.3f, byte ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # byte need not always equal glyph!
+            else:
+                textstring = u''.join(node[1][0].Unicode for node in text) # same length as text
+                logger.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
+                confidences = self.rater.rate_once(textstring)
+                i = 0
+                for node in text:
+                    textequiv = node[1][0] # 1st choice only
+                    j = len(textequiv.Unicode)
+                    conf = sum(confidences[i:i+j])/j
+                    textequiv.set_conf(conf) # todo: incorporate input confidences, too (weighted product or as input into LM)
+                    i += j
+                if i != len(confidences):
+                    logger.err("Input text length and output scores length are off by %d characters", i-len(confidences))
+                avg = sum(confidences)/len(confidences)
+                ent = sum([-log(max(p,1e-99), 2) for p in confidences])/len(confidences)
+                ppl = pow(2.0, ent) # character level
+                ppll = pow(2.0, ent * len(confidences)/len(text)) # textequiv level (including spaces/newlines)
+                logger.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # char need not always equal glyph!
             ID = concat_padded(self.output_file_grp, n)
             self.workspace.add_file(
                 ID=ID,
@@ -155,3 +219,15 @@ class KerasRate(Processor):
                 mimetype=MIMETYPE_PAGE,
                 content=to_xml(pcgts),
             )
+
+def filter_choices(textequivs):
+    '''assuming `textequivs` are already sorted by input confidence (conf attribute), ensure maximum number and maximum relative threshold'''
+    textequivs = textequivs[:min(CHOICE_THRESHOLD_NUM,len(textequivs))]
+    if len(textequivs) > 0:
+        conf0 = textequivs[0].conf
+        if conf0:
+            return [te for te in textequivs if (conf0 - te.conf < CHOICE_THRESHOLD_CONF)]
+        else:
+            return textequivs
+    else:
+        return []

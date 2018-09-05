@@ -302,6 +302,7 @@ class Rater(object):
         any number of hypotheses (i.e. batch size), identified by list position: 
         For `candidates` hypotheses with their `initial_states`, return a tuple of 
         their probabilities and their final states (for the next run).
+        If any of `initial_states` is None, it is treated like reset (zero states).
 
         Return a list of probability arrays and of final states.
 
@@ -321,6 +322,9 @@ class Rater(object):
         # each initial_states[i] is a layer list (h1,c1,h2,c2,...) of state vectors
         # thus, each layer is a single input (and output) in addition to normal input (and output)
         # for batch processing, all hypotheses must be passed together:
+        for i, initial_state in enumerate(initial_states):
+            if not initial_state:
+                initial_states[i] = [numpy.zeros((self.width), dtype=numpy.float) for n in range(0,self.depth*2)] # h+c per layer
         states_input = [numpy.vstack([initial_state[layer] for initial_state in initial_states]) for layer in range(0,self.depth*2)] # stack layers across batch (h+c per layer)
         x = numpy.expand_dims(numpy.eye(256, dtype=numpy.bool)[candidates], axis=1) # one-hot vector for all bytes; add time dimension
         output = self.model.predict_on_batch([x] + states_input)
@@ -491,7 +495,7 @@ class Node(object):
     and 3 content attributes:
     - `value`: byte at that position in the sequence
     - `state`: LM state vectors representing the past sequence
-    - `extras`: UTF-8 incremental decoder state after value
+    - `extras`: UTF-8 incremental decoder state after value, or node identifier of value
     as well as a score attribute:
     - `cum_cost`: cumulative LM score of sequence after value
     and two convenience attributes:
@@ -507,7 +511,7 @@ class Node(object):
         self.state = state # list of recurrent hidden layers states (h and c for each layer)
         self.cum_cost = parent.cum_cost + cost if parent else cost
         self.length = 1 if parent is None else parent.length + 1
-        self.extras = extras # UTF-8 decoder state
+        self.extras = extras # UTF-8 decoder state or node identifier
         self._sequence = None
         #print('added node', bytes([n.value for n in self.to_sequence()]).decode("utf-8", "ignore"))
     

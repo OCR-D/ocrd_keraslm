@@ -1,6 +1,6 @@
 {
   "git_url": "https://github.com/OCR-D/ocrd_keraslm",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tools": {
     "ocrd-keraslm-rate": {
       "executable": "ocrd-keraslm-rate",
@@ -32,6 +32,11 @@
           "type": "boolean",
           "description": "whether to insert whitespace and newline as pseudo-glyphs in result (at glyph level)",
           "default": false
+        },
+        "alternative_decoding": {
+          "type": "boolean",
+          "description": "whether to process all TextEquiv alternatives, finding the best path via beam search, and delete each non-best alternative",
+          "default": true
         }
       }
     }
