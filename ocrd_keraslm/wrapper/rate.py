@@ -1,6 +1,7 @@
 from __future__ import absolute_import
 from math import log
 from bisect import insort_left
+from numpy.linalg import norm
 
 from ocrd import Processor, MIMETYPE_PAGE
 from ocrd.utils import getLogger, concat_padded, xywh_from_points, points_from_xywh
@@ -12,9 +13,11 @@ from ocrd_keraslm import lib
 
 logger = getLogger('processor.KerasRate')
 
-CHOICE_THRESHOLD_NUM = 3 # maximum number of choices to try per element
-CHOICE_THRESHOLD_CONF = 0.2 # maximum score drop from best choice to try per element
-BEAM_WIDTH = 100 # maximum number of paths to consider during search
+CHOICE_THRESHOLD_NUM = 4 # maximum number of choices to try per element
+CHOICE_THRESHOLD_CONF = 0.1 # maximum score drop from best choice to try per element
+BEAM_WIDTH = 100 # maximum number of best partial paths to consider during search with alternative_decoding
+BEAM_CLUSTERING_ENABLE = True # enable pruning partial paths by history clustering
+BEAM_CLUSTERING_DIST = 5 # maximum distance between state vectors to form a cluster
 MAX_ELEMENTS = 500 # maximum number of lower level elements embedded within each element (for word/glyph iterators)
 
 class KerasRate(Processor):
@@ -150,7 +153,7 @@ class KerasRate(Processor):
                     fringe = next_fringe
                     next_fringe = []
                     for node in fringe:
-                        new_nodes = [lib.Node(parent=node, state=node.state, value=node.value, cost=0.0, extras=(element[0],textequiv.index)) for textequiv in element[1]] # copies of node (keeping value+state until prediction)
+                        new_nodes = [lib.Node(parent=node, state=node.state, value=node.value, cost=0.0, extras=(element[0],textequiv)) for textequiv in element[1]] # copies of node (keeping value+state until prediction)
                         alternatives = [textequiv.Unicode.encode("utf-8") for textequiv in element[1]] # byte sequences
                         for i in range(MAX_ELEMENTS): # accumulate states and costs of all alternatives (of different length) in node
                             updates = [j for j in range(len(element[1])) if i<len(alternatives[j])] # indices to update
@@ -162,6 +165,24 @@ class KerasRate(Processor):
                                 new_node.state = states[j]
                                 new_node.cum_cost += -log(max(preds[j][new_node.value], 1e-99), 2)
                         for new_node in new_nodes:
+                            def history_clustering():
+                                for old_node in next_fringe:
+                                    if (new_node.value == old_node.value and
+                                        all(norm(new_node.state[layer]-old_node.state[layer]) < BEAM_CLUSTERING_DIST for layer in range(self.rater.depth))):
+                                        if old_node.cum_cost < new_node.cum_cost:
+                                            # logger.debug("discarding %s in favour of %s due to history clustering",
+                                            #              ''.join([prev_node.extras[1].Unicode for prev_node in new_node.to_sequence()[1:]]),
+                                            #              ''.join([prev_node.extras[1].Unicode for prev_node in old_node.to_sequence()[1:]]))
+                                            return True # continue with next new_node
+                                        else:
+                                            # logger.debug("neglecting %s in favour of %s due to history clustering",
+                                            #              ''.join([prev_node.extras[1].Unicode for prev_node in old_node.to_sequence()[1:]]),
+                                            #              ''.join([prev_node.extras[1].Unicode for prev_node in new_node.to_sequence()[1:]]))
+                                            next_fringe.remove(old_node)
+                                            break # immediately proceed to insert new_node
+                                return False # proceed to insert new_node (no clustering possible)
+                            if BEAM_CLUSTERING_ENABLE and history_clustering():
+                                continue
                             insort_left(next_fringe, new_node) # insert sorted by cumulative costs
                             # todo: incorporate input confidences, too (weighted product or as input into LM)
                     # todo: history clustering for pruning paths by joining similar nodes (instead of neglecting costly nodes)
@@ -169,21 +190,16 @@ class KerasRate(Processor):
                     next_fringe = next_fringe[:BEAM_WIDTH] # keep best paths (equals batch size)
                 best = next_fringe[0] # best-scoring path
                 best_len = 0
-                for node in best.to_sequence():
-                    if not node.parent:
-                        continue # ignore root node
+                for node in best.to_sequence()[1:]: # ignore root node
                     element = node.extras[0]
                     if element: # not just space
                         textequivs = element.get_TextEquiv()
-                        try:
-                            textequiv = next(te for te in textequivs if te.index == node.extras[1])
-                            element.set_TextEquiv([textequiv]) # delete others
-                            textequiv_len = len(textequiv.Unicode.encode("utf-8"))
-                            best_len += textequiv_len
-                            textequiv.set_conf(pow(2.0, -(node.cum_cost-node.parent.cum_cost)/textequiv_len)) # average probability
-                            #print(textequiv.Unicode, end='')
-                        except StopIteration:
-                            logger.err("TextEquiv index %d not found at element '%s'", node.extras[1], element.id)
+                        textequiv = node.extras[1]
+                        element.set_TextEquiv([textequiv]) # delete others
+                        textequiv_len = len(textequiv.Unicode.encode("utf-8"))
+                        best_len += textequiv_len
+                        textequiv.set_conf(pow(2.0, -(node.cum_cost-node.parent.cum_cost)/textequiv_len)) # average probability
+                        #print(textequiv.Unicode, end='')
                     else:
                         best_len += 1
                         #print(bytes([node.value]).decode("utf-8"), end='')
