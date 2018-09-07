@@ -1,5 +1,5 @@
 from keras.callbacks import Callback
-import click, numpy, pickle
+import click, numpy, pickle, codecs
 from random import shuffle
 from math import log, exp, ceil, floor
 
@@ -31,7 +31,7 @@ class Rater(object):
         self.validation_split = 0.2 # fraction of training data to use for validation (generalization control)
     
     def configure(self):
-        from keras.layers import Dense
+        from keras.layers import Dense, TimeDistributed
         from keras.layers import LSTM, CuDNNLSTM
         from keras import backend as K
         from keras.models import Sequential
@@ -46,17 +46,21 @@ class Rater(object):
               self.depth, 'width', self.width,'length', self.length)
         lstm = CuDNNLSTM if has_cuda else LSTM
         for i in range(self.depth):
-            args = {'return_sequences': (i+1 < self.depth), 'stateful': self.stateful}
+            args = {'return_sequences': (i+1 < self.depth) or self.stateful, 'stateful': self.stateful}
             if not has_cuda:
                 args['recurrent_activation'] = 'sigmoid' # instead of default 'hard_sigmoid' which deviates from CuDNNLSTM
             if i == 0:
                 if self.stateful:
-                    args['batch_input_shape'] = (self.minibatch_size, length, 256) # batch size must be constant
+                    self.minibatch_size = 1
+                    args['batch_input_shape'] = (self.minibatch_size, None, 256) # batch size must be constant, length variable
                 else:
                     args['input_shape'] = (length, 256) # batch size not fixed (e.g. different between training and prediction)
             self.model.add(lstm(self.width,
                                 **args))
-        self.model.add(Dense(256, activation='softmax'))
+        if self.stateful:
+            self.model.add(TimeDistributed(Dense(256, activation='softmax')))
+        else:
+            self.model.add(Dense(256, activation='softmax'))
         self.model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         
         self.status = 1
@@ -72,7 +76,7 @@ class Rater(object):
         data = list(data)
         shuffle(data) # random order of files (because generators cannot shuffle within files)
         if self.stateful: # we must split file-wise in stateful mode
-            steps = 1 # really necessary?
+            steps = self.length
             split = ceil(len(data)*self.validation_split) # split position in randomized file list
             training_data, validation_data = data[:-split], data[-split:] # reserve last files for validation
             for f in validation_data:
@@ -80,11 +84,11 @@ class Rater(object):
             training_epoch_size = 0
             for f in training_data:
                 text = f.read()
-                training_epoch_size += floor(len(text)/steps/self.minibatch_size)
+                training_epoch_size += ceil((len(text)-self.length)/steps/self.minibatch_size)
             validation_epoch_size = 0
             for f in validation_data:
                 text = f.read()
-                validation_epoch_size += floor(len(text)/steps/self.minibatch_size)
+                validation_epoch_size += ceil((len(text)-self.length)/steps/self.minibatch_size)
             reset_cb = ResetStatesCallback()
         else: # we can split window by window in stateless mode
             steps = 3
@@ -94,7 +98,7 @@ class Rater(object):
                 for f in bar:
                     text = f.read()
                     size = len(text)
-                    total_size += size
+                    total_size += size - self.length
                     max_size = max(max_size, size)
             epoch_size = total_size/steps/self.minibatch_size
             training_epoch_size = ceil(epoch_size*(1-self.validation_split))
@@ -120,12 +124,18 @@ class Rater(object):
                         if not self.stateful and (split[int(i/steps)]<self.validation_split) == train:
                             continue # data shared between training and split: belongs to other generator
                         sequences.append(text[i: i + self.length])
-                        next_chars.append(text[i + self.length])
+                        if self.stateful:
+                            next_chars.append(text[i+1: i+1 + self.length])
+                        else:
+                            next_chars.append(text[i + self.length])
                         if (len(sequences) % self.minibatch_size == 0 # next minibatch full
-                            or i + steps > len(text) - self.length): # last minibatch
+                            or i + steps >= len(text) - self.length): # last minibatch: partially filled batch
                             # vectorization
                             x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
-                            y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
+                            if self.stateful:
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,next_chars)), dtype=numpy.uint8)]
+                            else:
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
                             yield (x,y)
                             if train and self.variable_length: # also train on partial windows?
                                 for j in range(1,self.length-1, steps):
@@ -231,22 +241,21 @@ class Rater(object):
         (predicting one by one).
         '''
         
+        # prediction calculation is a lot slower that way than via batched generator, cf. rate_once() / test()
         # perplexity calculation is a lot slower that way than via tensor metric, cf. test()
-        # todo: allow graph input (by pruning via history clustering or push forward algorithm;
-        #                       or by aggregating lattice input)
-        # todo: make incremental
         assert self.status > 1
         x = numpy.zeros((1, self.length, 256), dtype=numpy.bool)
         entropy = 0
         result = []
         length = 0
         self.model.reset_states()
-        for c in text: # could be single characters or words later-on (when applying incrementally or from graph)
+        for c in text:
             p = 1.0
             for b in c.encode("utf-8"):
                 x_input = x[:,x.any(axis=2)[0]] if self.variable_length else x
                 if x_input.shape[1] > 0: # to prevent length 0 input
-                    pred = dict(enumerate(self.model.predict(x_input, batch_size=1, verbose=0).tolist()[0]))
+                    output = self.model.predict_on_batch(x_input).tolist()
+                    pred = dict(enumerate(output[0][0] if self.stateful else output[0]))
                     entropy -= log(pred[b], 2)
                     length += 1
                     p *= pred[b]
@@ -285,16 +294,16 @@ class Rater(object):
         
         assert self.status > 1
         text = textstring.encode("utf-8") # byte sequence
-        total_size = len(text)
-        steps = 1
-        epoch_size = ceil((total_size-1)/self.minibatch_size)
+        size = len(text)
+        steps = self.length if self.stateful else 1
+        epoch_size = ceil((size-1)/self.minibatch_size/steps)
         
         # data preparation
         def gen_data(text):
             # encode
             while True:
                 sequences = []
-                for i in range(1, len(text), steps): # sequence must not be length zero with tensorflow
+                for i in range(self.length if self.stateful else 0, size-1, steps): # sequence must not be length zero with tensorflow
                     if i < self.length:
                         if self.variable_length:
                             # partial window (needs interim minibatch size 1)
@@ -308,21 +317,31 @@ class Rater(object):
                     else:
                         sequences.append(text[i - self.length: i])
                     if (len(sequences) % self.minibatch_size == 0 or 
-                        i + steps >= len(text)): # last minibatch
+                        i + steps >= size-1): # last minibatch: partially filled batch (smaller than self.minibatch_size)
                         # vectorization
                         x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
                         yield x
                         sequences = []
-                break
+                    if i + steps >= size-1: # last minibatch: 1 sample with partial length
+                        if self.stateful:
+                            sequences.append(text[i: size-1])
+                        else:
+                            sequences.append(text[size-1 - self.length: size-1])
+                        # vectorization
+                        x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                        yield x
+                break # cause StopIteration exception (epoch size miscalculation)
         
         preds = self.model.predict_generator(gen_data(text), steps=epoch_size, verbose=1) # todo: make iterator thread-safe and use_multiprocesing=True
+        preds = preds.reshape((size-1,256)) # reshape concatenation of batches to a contiguous temporal sequence
         # get predictions for true symbols (bytes)
-        probs = [1/256]+preds[range(len(text)-1),bytearray(text)[1:]].tolist() # all symbols but first byte (uniform prediction)
+        probs = [1/256]+preds[range(size-1),bytearray(text)[1:]].tolist() # all symbols but first byte (uniform prediction)
         # get predictions for true symbols (characters)
+        encoder = codecs.getincrementalencoder("utf-8")()
         cprobs = [1.0] * len(textstring)
         j = 0
         for (i,c) in enumerate(textstring):
-            for k in range(len(c.encode("utf-8"))):
+            for k in range(len(encoder.encode(c))):
                 cprobs[i] *= probs[j]
                 j += 1
         assert j == len(text)
@@ -335,20 +354,20 @@ class Rater(object):
         '''
         
         assert self.status > 1
+        self.model.reset_states()
         # todo: Since Keras does not allow callbacks within evaluate() / evaluate_generator() / test_loop(),
         #       we cannot reset_states() between input files as we do in train().
         #       Thus we should evaluate each file individually, reset in between, and accumulate losses.
         #       But this looks awkward, since we get N progress bars instead of 1, in contrast to training.
         #       Perhaps the overall error introduced into stateful models by not resetting is not that high
         #       after all?
-        total_size = 0
+        epoch_size = 0
+        steps = self.length if self.stateful else 1
         with click.progressbar(test_data) as bar:
             for f in bar:
                 text = f.read()
                 size = len(text)
-                total_size += size
-        steps = 1
-        epoch_size = ceil((total_size-len(test_data))/self.minibatch_size)
+                epoch_size += ceil((size-1)/self.minibatch_size/steps)
         
         # data preparation
         def gen_data(files):
@@ -357,10 +376,10 @@ class Rater(object):
                 for f in files:
                     f.seek(0)
                     text = f.read()
+                    # if self.stateful: reset_cb.reset(f.name)
                     sequences = []
                     next_chars = []
-                    for i in range(1, len(text), steps): # sequence must not be length zero with tensorflow
-                        next_chars.append(text[i])
+                    for i in range(self.length if self.stateful else 0, len(text)-1, steps):
                         if i < self.length:
                             if self.variable_length:
                                 # partial window (needs interim minibatch size 1)
@@ -375,14 +394,36 @@ class Rater(object):
                                 sequences.append(b'\0' * (self.length - i) + text[0:i])
                         else:
                             sequences.append(text[i - self.length: i])
+                        if self.stateful:
+                            next_chars.append(text[i+1 - self.length: i+1])
+                        else:
+                            next_chars.append(text[i])
                         if (len(sequences) % self.minibatch_size == 0 or 
-                            i + steps > len(text)): # last minibatch
+                            i + steps >= len(text)-1): # last minibatch: partially filled batch (smaller than self.minibatch_size)
                             # vectorization
                             x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
-                            y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
+                            if self.stateful:
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,next_chars)), dtype=numpy.uint8)]
+                            else:
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
                             yield (x,y)
                             sequences = []
                             next_chars = []
+                        if i + steps >= len(text)-1: # last minibatch: 1 sample with partial length
+                            if self.stateful:
+                                next_chars.append(text[i+1: len(text)])
+                                sequences.append(text[i: len(text)-1])
+                            else:
+                                next_chars.append(text[len(text)])
+                                sequences.append(text[len(text)-1 - self.length: len(text)-1])
+                            # vectorization
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            if self.stateful:
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,next_chars)), dtype=numpy.uint8)]
+                            else:
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
+                            yield (x,y)
+                break # cause StopIteration exception (epoch size miscalculation)
         
         loss, accuracy = self.model.evaluate_generator(gen_data(test_data), steps=epoch_size, verbose=1) # todo: make iterator thread-safe and use_multiprocesing=True
         return exp(loss)
