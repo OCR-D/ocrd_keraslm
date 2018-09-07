@@ -3,6 +3,8 @@ from __future__ import absolute_import
 
 from os.path import isfile
 import click, sys, json
+import numpy, codecs
+from bisect import insort_left
 
 from ocrd_keraslm import lib
 
@@ -15,7 +17,7 @@ def cli():
 @click.option('-c', '--config', default="model.config.pkl", help='model config file', type=click.Path(dir_okay=False, writable=True))
 @click.option('-w', '--width', default=128, help='number of nodes per hidden layer', type=click.IntRange(min=1, max=9128))
 @click.option('-d', '--depth', default=2, help='number of hidden layers', type=click.IntRange(min=1, max=10))
-@click.option('-l', '--length', default=5, help='number of previous bytes seen (window size)', type=click.IntRange(min=1, max=500))
+@click.option('-l', '--length', default=256, help='number of previous bytes seen (window size)', type=click.IntRange(min=1, max=500))
 @click.argument('data', nargs=-1, type=click.File('rb'))
 def train(model, config, width, depth, length, data):
     """Train a language model from DATA files,
@@ -100,6 +102,60 @@ def test(model, config, data):
     perplexity = rater.test(data)
     click.echo(perplexity)
 
+@cli.command(short_help='sample characters from language model')
+@click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-c', '--config', required=True, help='model config file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-n', '--number', default=1, help='number of bytes to sample', type=click.IntRange(min=1, max=10000))
+@click.argument('context', type=click.STRING)
+def generate(model, config, number, context):
+    """Apply a language model, generating the most probable characters (starting with CONTEXT string)."""
+
+    # load model
+    rater = lib.Rater()
+    rater.load_config(config)
+    rater.stateful = False # no implicit state transfer
+    rater.incremental = True # but explicit state transfer
+    rater.configure()
+    rater.load_weights(model)
+
+    # initial state
+    context_states = [None]
+    # context (to get correct initial state)
+    context_bytes = context.encode("utf-8")
+    for b in context_bytes[:-1]: # all but last byte
+        _, context_states = rater.rate_single([b], context_states)
+    decoder = codecs.getincrementaldecoder('utf-8')()
+    decoder.decode(context_bytes)
+    next_fringe = [lib.Node(parent=None,
+                            state=context_states[0],
+                            value=context_bytes[-1], # last byte
+                            cost=0.0,
+                            extras=decoder.getstate())]
+    # beam search
+    for i in range(0,number): # iterate over number of bytes to be generated
+        fringe = next_fringe
+        preds, states = rater.rate_single([n.value for n in fringe], [n.state for n in fringe])
+        next_fringe = []
+        for j, n in enumerate(fringe): # iterate over batch
+            pred = preds[j]
+            pred_best = numpy.argsort(pred)[-10:] # keep only 10-best alternatives
+            pred_best = pred_best[numpy.searchsorted(pred[pred_best], 0.004):] # keep only alternatives better than 1/256 (uniform distribution)
+            costs = -numpy.log(pred[pred_best])
+            state = states[j]
+            for best, cost in zip(pred_best, costs): # follow up on best predictions
+                decoder.setstate(n.extras)
+                try:
+                    decoder.decode(bytes([best]))
+                    n_new = lib.Node(parent=n, state=state, value=best, cost=cost, extras=decoder.getstate())
+                    insort_left(next_fringe, n_new) # add alternative to tree
+                except UnicodeDecodeError:
+                    pass # ignore this alternative
+        next_fringe = next_fringe[:256] # keep 256-best paths (equals batch size)
+    # todo: keep only candidates with clean decoder state (no partial codepoints), then resort
+    best = next_fringe[0] # best-scoring
+    result = bytes([n.value for n in best.to_sequence()])
+    click.echo(context_bytes[:-1] + result)
+    
 
 if __name__ == '__main__':
     cli()

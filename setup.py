@@ -12,7 +12,7 @@ with codecs.open('README.md', encoding='utf-8') as f:
 
 setup(
     name='ocrd_keraslm',
-    version='0.1.0',
+    version='0.2.0',
     description='keras language model',
     long_description=README,
     author='Konstantin Baierer, Kay-Michael Würzner',
