@@ -20,7 +20,7 @@ class Rater(object):
     - `Rater.test`/`scripts.test` : file handles of byte sequences
     - `Rater.rate`/`scripts.apply` : character string
     - `Rater.rate_once`/`wrapper.ocrd_keraslm_rate` : character string
-    - `Rater.rate_single`/`scripts.generate` : alternative list of bytes and states
+    - `Rater.rate_single`/`scripts.generate` or `wrapper.ocrd_keraslm_rate` : alternative list of bytes and states
     '''
     
     def __init__(self):
@@ -95,7 +95,7 @@ class Rater(object):
         
         self.status = 1
     
-    def train(self, data):
+    def train(self, data, val_data=None):
         '''Train model on text files.
         
         Pass the UTF-8 byte sequences in all `data` files to the loop
@@ -103,18 +103,27 @@ class Rater(object):
         It will open file by file, repeating over the complete set (epoch)
         as long as validation error does not increase in between (early stopping).
         Validate on a random fraction of the file set automatically separated before.
+        (Data are split by window/file in stateless/stateful mode.)
+
+        If `val_data` is given, then do not split, but use those files
+        for validation instead (regardless of mode).
         '''
+        from os.path import exists
         from keras.callbacks import EarlyStopping, ModelCheckpoint
         
         assert self.status > 0 # incremental training is allowed
         assert self.incremental == False # no explicit state transfer
-        
+
         data = list(data)
         shuffle(data) # random order of files (because generators cannot shuffle within files)
         if self.stateful: # we must split file-wise in stateful mode
             steps = self.length
-            split = ceil(len(data)*self.validation_split) # split position in randomized file list
-            training_data, validation_data = data[:-split], data[-split:] # reserve last files for validation
+            if val_data:
+                training_data = data
+                validation_data = val_data
+            else:
+                split = ceil(len(data)*self.validation_split) # split position in randomized file list
+                training_data, validation_data = data[:-split], data[-split:] # reserve last files for validation
             for f in validation_data:
                 print ('using input', f.name, 'for validation only')
             training_epoch_size = 0
@@ -125,6 +134,7 @@ class Rater(object):
             for f in validation_data:
                 text = f.read()
                 validation_epoch_size += ceil((len(text)-self.length)/steps/self.minibatch_size)
+            split = None
             reset_cb = ResetStatesCallback()
         else: # we can split window by window in stateless mode
             steps = 3
@@ -136,13 +146,25 @@ class Rater(object):
                     size = len(text)
                     total_size += size - self.length
                     max_size = max(max_size, size)
-            epoch_size = total_size/steps/self.minibatch_size
-            training_epoch_size = ceil(epoch_size*(1-self.validation_split))
-            validation_epoch_size = ceil(epoch_size*self.validation_split)
+            if val_data:
+                training_epoch_size = ceil(total_size/steps/self.minibatch_size)
+                with click.progressbar(val_data) as bar:
+                    for f in bar:
+                        text = f.read()
+                        size = len(text)
+                        total_size += size - self.length
+                validation_epoch_size = ceil(total_size/steps/self.minibatch_size)
+                training_data = data
+                validation_data = val_data
+                split = None
+            else:
+                epoch_size = total_size/steps/self.minibatch_size
+                training_epoch_size = ceil(epoch_size*(1-self.validation_split))
+                validation_epoch_size = ceil(epoch_size*self.validation_split)
+                validation_data, training_data = data, data # same data, different generators (see below)
+                split = numpy.random.uniform(0,1, (ceil(max_size/steps),)) # reserve split fraction at random positions
             if self.variable_length:
                 training_epoch_size *= ceil((self.length-1)/steps) # training data augmented with partial windows
-            validation_data, training_data = data, data # same data, different generators (see below)
-            split = numpy.random.uniform(0,1, (ceil(max_size/steps),)) # reserve split fraction at random positions
         
         #
         # data preparation
@@ -157,7 +179,7 @@ class Rater(object):
                     sequences = []
                     next_chars = []
                     for i in range(0, len(text) - self.length, steps):
-                        if not self.stateful and (split[int(i/steps)]<self.validation_split) == train:
+                        if split and (split[int(i/steps)]<self.validation_split) == train:
                             continue # data shared between training and split: belongs to other generator
                         sequences.append(text[i: i + self.length])
                         if self.stateful:

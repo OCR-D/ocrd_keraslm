@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
-from os.path import isfile
+import os
 import click, sys, json
 import numpy, codecs
 from bisect import insort_left
@@ -17,38 +17,46 @@ def cli():
 @click.option('-c', '--config', default="model.config.pkl", help='model config file', type=click.Path(dir_okay=False, writable=True))
 @click.option('-w', '--width', default=128, help='number of nodes per hidden layer', type=click.IntRange(min=1, max=9128))
 @click.option('-d', '--depth', default=2, help='number of hidden layers', type=click.IntRange(min=1, max=10))
-@click.option('-l', '--length', default=256, help='number of previous bytes seen (window size)', type=click.IntRange(min=1, max=500))
+@click.option('-l', '--length', default=256, help='number of previous bytes seen (window size)', type=click.IntRange(min=1, max=1024))
+@click.option('-v', '--val-data', default=None, help='directory containing validation data files (no split)', type=click.Path(exists=True, dir_okay=True, file_okay=False))
 @click.argument('data', nargs=-1, type=click.File('rb'))
-def train(model, config, width, depth, length, data):
+def train(model, config, width, depth, length, val_data, data):
     """Train a language model from DATA files,
        with parameters WIDTH, DEPTH, and LENGTH.
 
-       The files will be randomly split into training and validation data.
+       The files will be randomly split into training and validation data,
+       except if VAL_DATA is given.
     """
     
     # train
     rater = lib.Rater()
     incremental = False
-    if isfile(model) and isfile(config):
+    if os.path.isfile(model) and os.path.isfile(config):
         rater.load_config(config)
         if rater.width == width and rater.depth == depth:
             incremental = True
     rater.width = width
     rater.depth = depth
     rater.length = length
-    if rater.stateful: # override necessary before compilation: 
-        rater.minibatch_size = rater.length # make sure states are consistent with windows after 1 minibatch
     
     rater.configure()
     if incremental:
         print ('loading weights for incremental training')
         rater.load_weights(model)
-    rater.train(data)
+    if val_data:
+        val_files = [os.path.join(val_data, f) for f in os.listdir(val_data)]
+        val_data = [open(f, mode='rb') for f in val_files if os.path.isfile(f)]
+    rater.train(data, val_data=val_data)
     
     # save model and dicts
     #rater.save(model)
     rater.save_config(config)
-    rater.save_weights(model)
+    assert rater.status == 2
+    if os.path.isfile("model_last.weights.h5"):
+        # use best-scoring weights from last checkpoint
+        rename("model_last.weights.h5", model) # mv
+    else:
+        rater.save_weights(model)
 
 @cli.command(short_help='get individual probabilities from language model')
 @click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
@@ -64,9 +72,6 @@ def apply(model, config, text):
     rater = lib.Rater()
     #rater.load(model)
     rater.load_config(config)
-    if rater.stateful: # override necessary before compilation: 
-        rater.length = 1 # allow single-sample batches
-        rater.minibatch_size = rater.length # make sure states are consistent with windows after 1 minibatch
     rater.configure()
     rater.load_weights(model)
     
@@ -79,8 +84,9 @@ def apply(model, config, text):
     ratings, perplexity = rater.rate(text)
     click.echo(perplexity)
     click.echo(json.dumps(ratings, ensure_ascii=False))
+    # much faster:
     #probs = rater.rate_once(text)
-    #click.echo(json.dumps(probs))
+    #click.echo(json.dumps(zip(text, probs)))
 
 @cli.command(short_help='get overall perplexity from language model')
 @click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
@@ -93,8 +99,6 @@ def test(model, config, data):
     rater = lib.Rater()
     #rater.load(model)
     rater.load_config(config)
-    if rater.stateful: # override necessary before compilation: 
-        rater.minibatch_size = rater.length # make sure states are consistent with windows after 1 minibatch
     rater.configure()
     rater.load_weights(model)
     
@@ -107,6 +111,7 @@ def test(model, config, data):
 @click.option('-c', '--config', required=True, help='model config file', type=click.Path(dir_okay=False, exists=True))
 @click.option('-n', '--number', default=1, help='number of bytes to sample', type=click.IntRange(min=1, max=10000))
 @click.argument('context', type=click.STRING)
+# todo: also allow specifying follow-up context
 def generate(model, config, number, context):
     """Apply a language model, generating the most probable characters (starting with CONTEXT string)."""
 
