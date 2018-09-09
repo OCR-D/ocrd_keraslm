@@ -37,6 +37,12 @@
           "type": "boolean",
           "description": "whether to process all TextEquiv alternatives, finding the best path via beam search, and delete each non-best alternative",
           "default": true
+        },
+        "beam_width": {
+          "type": "number",
+          "format": "integer",
+          "description": "maximum number of best partial paths to consider during search with alternative_decoding",
+          "default": 100
         }
       }
     }

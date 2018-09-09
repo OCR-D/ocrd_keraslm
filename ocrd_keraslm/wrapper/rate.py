@@ -15,7 +15,7 @@ logger = getLogger('processor.KerasRate')
 
 CHOICE_THRESHOLD_NUM = 4 # maximum number of choices to try per element
 CHOICE_THRESHOLD_CONF = 0.1 # maximum score drop from best choice to try per element
-BEAM_WIDTH = 100 # maximum number of best partial paths to consider during search with alternative_decoding
+#BEAM_WIDTH = 100 # maximum number of best partial paths to consider during search with alternative_decoding
 BEAM_CLUSTERING_ENABLE = True # enable pruning partial paths by history clustering
 BEAM_CLUSTERING_DIST = 5 # maximum distance between state vectors to form a cluster
 MAX_ELEMENTS = 500 # maximum number of lower level elements embedded within each element (for word/glyph iterators)
@@ -46,6 +46,7 @@ class KerasRate(Processor):
         Performs the rating.
         """
         level = self.parameter['textequiv_level']
+        BEAM_WIDTH = self.parameter['beam_width']
         for (n, input_file) in enumerate(self.input_files):
             logger.info("INPUT FILE %i / %s", n, input_file)
             pcgts = from_file(self.workspace.download_file(input_file))
