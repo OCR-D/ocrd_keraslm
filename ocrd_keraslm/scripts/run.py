@@ -54,7 +54,7 @@ def train(model, config, width, depth, length, val_data, data):
     assert rater.status == 2
     if os.path.isfile("model_last.weights.h5"):
         # use best-scoring weights from last checkpoint
-        rename("model_last.weights.h5", model) # mv
+        os.rename("model_last.weights.h5", model) # mv
     else:
         rater.save_weights(model)
 
