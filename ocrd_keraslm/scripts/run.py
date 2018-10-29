@@ -2,9 +2,12 @@
 from __future__ import absolute_import
 
 import os
-import click, sys, json
-import numpy, codecs
+import sys
+import codecs
 from bisect import insort_left
+import json
+import click
+import numpy
 
 from ocrd_keraslm import lib
 
@@ -41,7 +44,7 @@ def train(model, config, width, depth, length, val_data, data):
     
     rater.configure()
     if incremental:
-        print ('loading weights for incremental training')
+        print('loading weights for incremental training')
         rater.load_weights(model)
     if val_data:
         val_files = [os.path.join(val_data, f) for f in os.listdir(val_data)]
@@ -127,8 +130,8 @@ def generate(model, config, number, context):
     context_states = [None]
     # context (to get correct initial state)
     context_bytes = context.encode("utf-8")
-    for b in context_bytes[:-1]: # all but last byte
-        _, context_states = rater.rate_single([b], context_states)
+    for context_byte in context_bytes[:-1]: # all but last byte
+        _, context_states = rater.rate_single([context_byte], context_states)
     decoder = codecs.getincrementaldecoder('utf-8')()
     decoder.decode(context_bytes)
     next_fringe = [lib.Node(parent=None,
@@ -137,7 +140,7 @@ def generate(model, config, number, context):
                             cost=0.0,
                             extras=decoder.getstate())]
     # beam search
-    for i in range(0,number): # iterate over number of bytes to be generated
+    for _ in range(0, number): # iterate over number of bytes to be generated
         fringe = next_fringe
         preds, states = rater.rate_single([n.value for n in fringe], [n.state for n in fringe])
         next_fringe = []
