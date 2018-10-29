@@ -1,7 +1,10 @@
-from keras.callbacks import Callback
-import click, numpy, pickle, codecs
+import pickle
+import codecs
 from random import shuffle
-from math import log, exp, ceil, floor
+from math import log, exp, ceil
+import click
+import numpy
+from keras.callbacks import Callback
 
 class Rater(object):
     '''A character-level RNN language model for rating text.
@@ -10,32 +13,29 @@ class Rater(object):
     (LSTM) language model on the (UTF-8) byte level. The model's
     topology (layers depth, per-layer width, window length) can
     be controlled before training.
-
+    
     To be used by stand-alone CLI (`scripts.train` for training,
     `scripts.apply` for prediction, `scripts.test` for evaluation),
-    or OCR-D processing (`wrapper.ocrd_keraslm_rate`). 
-
+    or OCR-D processing (`wrapper.ocrd_keraslm_rate`).
+    
     Interfaces:
     - `Rater.train`/`scripts.train` : file handles of byte sequences
     - `Rater.test`/`scripts.test` : file handles of byte sequences
     - `Rater.rate`/`scripts.apply` : character string
     - `Rater.rate_once`/`wrapper.ocrd_keraslm_rate` : character string
-    - `Rater.rate_single`/`scripts.generate` or `wrapper.ocrd_keraslm_rate` : alternative list of bytes and states
+    - `Rater.rate_single`/`scripts.generate` or `wrapper.ocrd_keraslm_rate` :
+      alternative list of bytes and states
     '''
     
     def __init__(self):
-        self.clear()
-    
-    def clear(self):
         '''Reset model and set all parameters to their defaults.'''
         
         self.model = None
         self.status = 0 # empty / compiled / trained?
         
-        self.length = 0 # will be overwritten by CLI for train / by load model for rate/test
-        self.width = 0 # will be overwritten by CLI for train / by load model for rate/test
-        self.depth = 0 # will be overwritten by CLI for train / by load model for rate/test
-        self.length = 0 # will be overwritten by CLI for train / by load model for rate/test
+        self.width = 0 # will be overwritten by CLI for train() / by load_config for rate()/test()
+        self.depth = 0 # will be overwritten by CLI for train() / by load_config for rate()/test()
+        self.length = 0 # will be overwritten by CLI for train() / by load_config for rate()/test()
         
         self.variable_length = False # also train on partially filled windows
         self.stateful = True # keep states across batches within one text (implicit state transfer)
@@ -50,7 +50,7 @@ class Rater(object):
         from keras.layers import LSTM, CuDNNLSTM
         from keras import backend as K
         from keras.models import Model
-
+        
         length = None if self.variable_length else self.length
         # automatically switch to CuDNNLSTM if CUDA GPU is available:
         has_cuda = K.backend() == 'tensorflow' and K.tensorflow_backend._get_available_gpus()
@@ -78,19 +78,22 @@ class Rater(object):
             if self.incremental:
                 # incremental prediction needs additional inputs and outputs for state (h,c):
                 states = [Input(**states_input_args), Input(**states_input_args)]
+                layer = lstm(self.width, return_state=True, **args)
                 model_states_input.extend(states)
-                model_output, state_h, state_c = lstm(self.width, return_state = True, **args)(model_output, initial_state = states)
+                model_output, state_h, state_c = layer(model_output, initial_state=states)
                 model_states_output.extend([state_h, state_c])
             else:
-                model_output = lstm(self.width, **args)(model_output)
+                layer = lstm(self.width, **args)
+                model_output = layer(model_output)
         if self.stateful:
-            model_output = TimeDistributed(Dense(256, activation='softmax'))(model_output)
+            layer = TimeDistributed(Dense(256, activation='softmax'))
         else:
-            model_output = Dense(256, activation='softmax')(model_output)
+            layer = Dense(256, activation='softmax')
+        model_output = layer(model_output)
         if self.incremental:
             self.model = Model([model_input] + model_states_input, [model_output] + model_states_output)
         else:
-            self.model = Model(model_input, model_output)            
+            self.model = Model(model_input, model_output)
         self.model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
         
         self.status = 1
@@ -99,21 +102,20 @@ class Rater(object):
         '''Train model on text files.
         
         Pass the UTF-8 byte sequences in all `data` files to the loop
-        training model weights with stochastic gradient descent. 
+        training model weights with stochastic gradient descent.
         It will open file by file, repeating over the complete set (epoch)
         as long as validation error does not increase in between (early stopping).
         Validate on a random fraction of the file set automatically separated before.
         (Data are split by window/file in stateless/stateful mode.)
-
+        
         If `val_data` is given, then do not split, but use those files
         for validation instead (regardless of mode).
         '''
-        from os.path import exists
         from keras.callbacks import EarlyStopping, ModelCheckpoint
         
         assert self.status > 0 # incremental training is allowed
-        assert self.incremental == False # no explicit state transfer
-
+        assert self.incremental is False # no explicit state transfer
+        
         data = list(data)
         shuffle(data) # random order of files (because generators cannot shuffle within files)
         if self.stateful: # we must split file-wise in stateful mode
@@ -124,15 +126,15 @@ class Rater(object):
             else:
                 split = ceil(len(data)*self.validation_split) # split position in randomized file list
                 training_data, validation_data = data[:-split], data[-split:] # reserve last files for validation
-            for f in validation_data:
-                print ('using input', f.name, 'for validation only')
+            for file in validation_data:
+                print('using input', file.name, 'for validation only')
             training_epoch_size = 0
-            for f in training_data:
-                text = f.read()
+            for file in training_data:
+                text = file.read()
                 training_epoch_size += ceil((len(text)-self.length)/steps/self.minibatch_size)
             validation_epoch_size = 0
-            for f in validation_data:
-                text = f.read()
+            for file in validation_data:
+                text = file.read()
                 validation_epoch_size += ceil((len(text)-self.length)/steps/self.minibatch_size)
             split = None
             reset_cb = ResetStatesCallback()
@@ -140,17 +142,17 @@ class Rater(object):
             steps = 3
             total_size = 0
             max_size = 0
-            with click.progressbar(data) as bar:
-                for f in bar:
-                    text = f.read()
+            with click.progressbar(data) as pbar:
+                for file in pbar:
+                    text = file.read()
                     size = len(text)
                     total_size += size - self.length
                     max_size = max(max_size, size)
             if val_data:
                 training_epoch_size = ceil(total_size/steps/self.minibatch_size)
-                with click.progressbar(val_data) as bar:
-                    for f in bar:
-                        text = f.read()
+                with click.progressbar(val_data) as pbar:
+                    for file in pbar:
+                        text = file.read()
                         size = len(text)
                         total_size += size - self.length
                 validation_epoch_size = ceil(total_size/steps/self.minibatch_size)
@@ -162,7 +164,7 @@ class Rater(object):
                 training_epoch_size = ceil(epoch_size*(1-self.validation_split))
                 validation_epoch_size = ceil(epoch_size*self.validation_split)
                 validation_data, training_data = data, data # same data, different generators (see below)
-                split = numpy.random.uniform(0,1, (ceil(max_size/steps),)) # reserve split fraction at random positions
+                split = numpy.random.uniform(0, 1, (ceil(max_size/steps),)) # reserve split fraction at random positions
             if self.variable_length:
                 training_epoch_size *= ceil((self.length-1)/steps) # training data augmented with partial windows
         
@@ -170,36 +172,38 @@ class Rater(object):
         # data preparation
         def gen_data(files, train):
             while True:
-                for f in files:
-                    f.seek(0)
+                for file in files:
+                    file.seek(0)
                     if self.stateful:
-                        reset_cb.reset(f.name)
-                    text = f.read()
+                        reset_cb.reset(file.name)
+                    text = file.read()
                     # encode
                     sequences = []
                     next_chars = []
                     for i in range(0, len(text) - self.length, steps):
-                        if split and (split[int(i/steps)]<self.validation_split) == train:
+                        if split and (split[int(i/steps)] < self.validation_split) == train:
                             continue # data shared between training and split: belongs to other generator
                         sequences.append(text[i: i + self.length])
                         if self.stateful:
                             next_chars.append(text[i+1: i+1 + self.length])
                         else:
                             next_chars.append(text[i + self.length])
-                        if (len(sequences) % self.minibatch_size == 0 # next minibatch full
-                            or i + steps >= len(text) - self.length): # last minibatch: partially filled batch
+                        if (len(sequences) % self.minibatch_size == 0 or # next minibatch full
+                                i + steps >= len(text) - self.length): # last minibatch: partially filled batch
                             # vectorization
-                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, sequences)), dtype=numpy.uint8)]
                             if self.stateful:
-                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,next_chars)), dtype=numpy.uint8)]
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, next_chars)), dtype=numpy.uint8)]
                             else:
                                 y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
-                            yield (x,y)
+                            yield (x, y)
                             if train and self.variable_length: # also train on partial windows?
-                                for j in range(1,self.length-1, steps):
-                                    #x[:, 0:j, :] = False # complete batch gets erased by sublength from the left to simulate running in with zero padding as in rate()
-                                    #yield (x,y)
-                                    yield (x[:,-j:,:],y) # complete batch gets shortened to sublength from the right to simulate running in with short sequences in rate()
+                                for j in range(1, self.length-1, steps):
+                                    # erase complete batch by sublength from the left to simulate running in with zero padding as in rate():
+                                    # x[:, 0:j, :] = False
+                                    # yield (x, y)
+                                    # shorten complete batch to sublength from the right to simulate running in with short sequences in rate():
+                                    yield (x[:, -j:, :], y)
                             sequences = []
                             next_chars = []
         
@@ -210,9 +214,10 @@ class Rater(object):
                                      save_best_only=True, save_weights_only=True, mode='min')]
         if self.stateful:
             callbacks.append(reset_cb)
-        self.model.fit_generator(gen_data(training_data, True), steps_per_epoch=training_epoch_size, epochs=100, 
+        # todo: make iterator thread-safe and then use_multiprocesing=True
+        self.model.fit_generator(gen_data(training_data, True), steps_per_epoch=training_epoch_size, epochs=100,
                                  validation_data=gen_data(validation_data, False), validation_steps=validation_epoch_size,
-                                 verbose=1, callbacks=callbacks) # todo: make iterator thread-safe and use_multiprocesing=True
+                                 verbose=1, callbacks=callbacks)
         
         # set state
         self.status = 2
@@ -274,8 +279,7 @@ class Rater(object):
         Load model configuration from `configfilename`.
         '''
         
-        if self.status > 0:
-            self.clear()
+        assert self.status == 0
         config = pickle.load(open(configfilename, mode='rb'))
         self.width = config['width']
         self.depth = config['depth']
@@ -307,39 +311,39 @@ class Rater(object):
         # prediction calculation is a lot slower that way than via batched generator, cf. rate_once() / test()
         # perplexity calculation is a lot slower that way than via tensor metric, cf. test()
         assert self.status > 1
-        assert self.incremental == False # no explicit state transfer
+        assert self.incremental is False # no explicit state transfer
         x = numpy.zeros((1, self.length, 256), dtype=numpy.bool)
         entropy = 0
         result = []
         length = 0
         self.model.reset_states()
-        for c in text:
-            p = 1.0
-            for b in c.encode("utf-8"):
-                x_input = x[:,x.any(axis=2)[0]] if self.variable_length else x
+        for char in text:
+            prob = 1.0
+            for char_byte in char.encode("utf-8"):
+                x_input = x[:, x.any(axis=2)[0]] if self.variable_length else x
                 if x_input.shape[1] > 0: # to prevent length 0 input
                     output = self.model.predict_on_batch(x_input).tolist()
                     pred = dict(enumerate(output[0][0] if self.stateful else output[0]))
-                    entropy -= log(pred[b], 2)
+                    entropy -= log(pred[char_byte], 2)
                     length += 1
-                    p *= pred[b]
+                    prob *= pred[char_byte]
                 x = numpy.roll(x, -1, axis=1) # left-shifted by 1
-                x[0,-1] = numpy.eye(256, dtype=numpy.bool)[b] # one-hot vector for b in last pos
-            result.append((c, p))
+                x[0, -1] = numpy.eye(256, dtype=numpy.bool)[char_byte] # one-hot vector for b in last pos
+            result.append((char, prob))
         return result, pow(2.0, entropy/length)
 
     def rate_single(self, candidates, initial_states):
         '''Predict probability from model, passing initial and final state.
-
-        Calculate the output probability distribution for a single input byte 
-        incrementally according to the current model. Do so in parallel for 
-        any number of hypotheses (i.e. batch size), identified by list position: 
-        For `candidates` hypotheses with their `initial_states`, return a tuple of 
+        
+        Calculate the output probability distribution for a single input byte
+        incrementally according to the current model. Do so in parallel for
+        any number of hypotheses (i.e. batch size), identified by list position:
+        For `candidates` hypotheses with their `initial_states`, return a tuple of
         their probabilities and their final states (for the next run).
         If any of `initial_states` is None, it is treated like reset (zero states).
-
+        
         Return a list of probability arrays and of final states.
-
+        
         (To be called by an adapter tracking history paths and input alternatives,
          combining them up to a maximum number of best running candidates, i.e. beam.
          See `scripts.generate` and `wrapper.ocrd_keraslm_rate` and `lib.Node`.)
@@ -347,8 +351,8 @@ class Rater(object):
         '''
         
         assert self.status > 1
-        assert self.stateful == False # no implicit state transfer
-        assert self.incremental == True # only explicit state transfer
+        assert self.stateful is False # no implicit state transfer
+        assert self.incremental is True # only explicit state transfer
         # todo: allow graph input (by pruning via history clustering or push forward algorithm;
         #                       or by aggregating lattice input)
         assert len(candidates) == len(initial_states)
@@ -358,30 +362,30 @@ class Rater(object):
         # for batch processing, all hypotheses must be passed together:
         for i, initial_state in enumerate(initial_states):
             if not initial_state:
-                initial_states[i] = [numpy.zeros((self.width), dtype=numpy.float) for n in range(0,self.depth*2)] # h+c per layer
-        states_input = [numpy.vstack([initial_state[layer] for initial_state in initial_states]) for layer in range(0,self.depth*2)] # stack layers across batch (h+c per layer)
+                initial_states[i] = [numpy.zeros((self.width), dtype=numpy.float) for n in range(0, self.depth*2)] # h+c per layer
+        states_input = [numpy.vstack([initial_state[layer] for initial_state in initial_states]) for layer in range(0, self.depth*2)] # stack layers across batch (h+c per layer)
         x = numpy.expand_dims(numpy.eye(256, dtype=numpy.bool)[candidates], axis=1) # one-hot vector for all bytes; add time dimension
         output = self.model.predict_on_batch([x] + states_input)
         probs_output = output[0] # actually we need a (hypo) list of (score) vectors
         states_output = list(output[1:]) # from (layers) tuple
         preds = []
         final_states = []
-        for i in range(0,n):
-            preds.append(probs_output[i,:])
+        for i in range(0, n):
+            preds.append(probs_output[i, :])
             final_states.append([layer[i:i+1] for layer in states_output])
         return preds, final_states
     
     def rate_once(self, textstring):
         '''Predict probabilities from model all at once.
-
+        
         Calculate the probabilities of the character sequence in `textstring`
         according to the current model (predicting all at once).
-
+        
         Return a list of probabilities (one per character/codepoint).
         '''
         
         assert self.status > 1
-        assert self.incremental == False # no explicit state transfer
+        assert self.incremental is False # no explicit state transfer
         text = textstring.encode("utf-8") # byte sequence
         size = len(text)
         steps = self.length if self.stateful else 1
@@ -397,7 +401,7 @@ class Rater(object):
                         if self.variable_length:
                             # partial window (needs interim minibatch size 1)
                             sequences.append(text[0:i])
-                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, sequences)), dtype=numpy.uint8)]
                             yield x
                             sequences = []
                         else:
@@ -405,10 +409,10 @@ class Rater(object):
                             sequences.append(b'\0' * (self.length - i) + text[0:i])
                     else:
                         sequences.append(text[i - self.length: i])
-                    if (len(sequences) % self.minibatch_size == 0 or 
+                    if (len(sequences) % self.minibatch_size == 0 or
                         i + steps >= size-1): # last minibatch: partially filled batch (smaller than self.minibatch_size)
                         # vectorization
-                        x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                        x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, sequences)), dtype=numpy.uint8)]
                         yield x
                         sequences = []
                     if i + steps >= size-1: # last minibatch: 1 sample with partial length
@@ -417,20 +421,21 @@ class Rater(object):
                         else:
                             sequences.append(text[size-1 - self.length: size-1])
                         # vectorization
-                        x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                        x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, sequences)), dtype=numpy.uint8)]
                         yield x
                 break # cause StopIteration exception (epoch size miscalculation)
-        
-        preds = self.model.predict_generator(gen_data(text), steps=epoch_size, verbose=1) # todo: make iterator thread-safe and use_multiprocesing=True
-        preds = preds.reshape((size-1,256)) # reshape concatenation of batches to a contiguous temporal sequence
+
+        # todo: make iterator thread-safe and then use_multiprocesing=True
+        preds = self.model.predict_generator(gen_data(text), steps=epoch_size, verbose=1)
+        preds = preds.reshape((size-1, 256)) # reshape concatenation of batches to a contiguous temporal sequence
         # get predictions for true symbols (bytes)
-        probs = [1/256]+preds[range(size-1),bytearray(text)[1:]].tolist() # all symbols but first byte (uniform prediction)
+        probs = [1/256]+preds[range(size-1), bytearray(text)[1:]].tolist() # all symbols but first byte (uniform prediction)
         # get predictions for true symbols (characters)
         encoder = codecs.getincrementalencoder("utf-8")()
         cprobs = [1.0] * len(textstring)
         j = 0
-        for (i,c) in enumerate(textstring):
-            for k in range(len(encoder.encode(c))):
+        for i, char in enumerate(textstring):
+            for _ in range(len(encoder.encode(char))):
                 cprobs[i] *= probs[j]
                 j += 1
         assert j == len(text)
@@ -438,15 +443,15 @@ class Rater(object):
     
     def test(self, test_data):
         '''Evaluate model on `test_data` files.
-
-        Calculate the perplexity of the UTF-8 byte sequences in 
+        
+        Calculate the perplexity of the UTF-8 byte sequences in
         all `test_data` files according to the current model.
-
+        
         Return the overall perplexity.
         '''
         
         assert self.status > 1
-        assert self.incremental == False # no explicit state transfer
+        assert self.incremental is False # no explicit state transfer
         self.model.reset_states()
         # todo: Since Keras does not allow callbacks within evaluate() / evaluate_generator() / test_loop(),
         #       we cannot reset_states() between input files as we do in train().
@@ -456,9 +461,9 @@ class Rater(object):
         #       after all?
         epoch_size = 0
         steps = self.length if self.stateful else 1
-        with click.progressbar(test_data) as bar:
-            for f in bar:
-                text = f.read()
+        with click.progressbar(test_data) as pbar:
+            for file in pbar:
+                text = file.read()
                 size = len(text)
                 epoch_size += ceil((size-1)/self.minibatch_size/steps)
         
@@ -466,9 +471,9 @@ class Rater(object):
         def gen_data(files):
             # encode
             while True:
-                for f in files:
-                    f.seek(0)
-                    text = f.read()
+                for file in files:
+                    file.seek(0)
+                    text = file.read()
                     # if self.stateful: reset_cb.reset(f.name)
                     sequences = []
                     next_chars = []
@@ -477,9 +482,9 @@ class Rater(object):
                             if self.variable_length:
                                 # partial window (needs interim minibatch size 1)
                                 sequences.append(text[0:i])
-                                x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                                x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, sequences)), dtype=numpy.uint8)]
                                 y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
-                                yield (x,y)
+                                yield (x, y)
                                 sequences = []
                                 next_chars = []
                             else:
@@ -491,15 +496,15 @@ class Rater(object):
                             next_chars.append(text[i+1 - self.length: i+1])
                         else:
                             next_chars.append(text[i])
-                        if (len(sequences) % self.minibatch_size == 0 or 
+                        if (len(sequences) % self.minibatch_size == 0 or
                             i + steps >= len(text)-1): # last minibatch: partially filled batch (smaller than self.minibatch_size)
                             # vectorization
-                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, sequences)), dtype=numpy.uint8)]
                             if self.stateful:
-                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,next_chars)), dtype=numpy.uint8)]
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, next_chars)), dtype=numpy.uint8)]
                             else:
                                 y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
-                            yield (x,y)
+                            yield (x, y)
                             sequences = []
                             next_chars = []
                         if i + steps >= len(text)-1: # last minibatch: 1 sample with partial length
@@ -510,15 +515,16 @@ class Rater(object):
                                 next_chars.append(text[len(text)])
                                 sequences.append(text[len(text)-1 - self.length: len(text)-1])
                             # vectorization
-                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,sequences)), dtype=numpy.uint8)]
+                            x = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, sequences)), dtype=numpy.uint8)]
                             if self.stateful:
-                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray,next_chars)), dtype=numpy.uint8)]
+                                y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(list(map(bytearray, next_chars)), dtype=numpy.uint8)]
                             else:
                                 y = numpy.eye(256, dtype=numpy.bool)[numpy.asarray(bytearray(next_chars), dtype=numpy.uint8)]
-                            yield (x,y)
+                            yield (x, y)
                 break # cause StopIteration exception (epoch size miscalculation)
-        
-        loss, accuracy = self.model.evaluate_generator(gen_data(test_data), steps=epoch_size, verbose=1) # todo: make iterator thread-safe and use_multiprocesing=True
+
+        # todo: make iterator thread-safe and then use_multiprocesing=True
+        loss, _accuracy = self.model.evaluate_generator(gen_data(test_data), steps=epoch_size, verbose=1)
         return exp(loss)
     
 
@@ -530,22 +536,24 @@ class ResetStatesCallback(Callback):
     and between training and validation (on_batch_end with batch>=steps_per_epoch-1).
     '''
     def __init__(self):
+        super(ResetStatesCallback, self).__init__()
         self.eof = False
         self.here = ''
         self.next = ''
     
     def reset(self, where):
+        '''Reset the model after the end of the current batch.'''
         self.eof = True
         self.next = where
     
-    def on_batch_begin(self, batch, logs={}):
+    def on_batch_begin(self, batch, logs=None):
         if self.eof:
             # between training files
             self.model.reset_states()
             self.eof = False
             self.here = self.next
     
-    def on_batch_end(self, batch, logs={}):
+    def on_batch_end(self, batch, logs=None):
         if logs.get('loss') > 25:
             print('huge loss in', self.here, 'at', batch)
         if (self.params['do_validation'] and batch >= self.params['steps']-1):
