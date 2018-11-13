@@ -1,6 +1,6 @@
 {
   "git_url": "https://github.com/OCR-D/ocrd_keraslm",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "tools": {
     "ocrd-keraslm-rate": {
       "executable": "ocrd-keraslm-rate",
@@ -10,15 +10,39 @@
       "steps": [
         "recognition/text-recognition"
       ],
-      "description": "Rate text with keras",
+      "description": "Rate each element of the text with a byte-level LSTM language model in Keras",
       "parameters": {
-        "model": {
+        "weight_file": {
           "type": "string",
+          "description": "path of h5 weight file for model trained with keraslm",
           "required": true
         },
-        "mapping": {
+        "config_file": {
           "type": "string",
+          "description": "path of pkl config file for model trained with keraslm",
           "required": true
+        },
+        "textequiv_level": {
+          "type": "string",
+          "enum": ["region", "line", "word", "glyph"],
+          "default": "glyph",
+          "description": "PAGE XML hierarchy level to evaluate TextEquiv sequences on"
+        },
+        "add_space_glyphs": {
+          "type": "boolean",
+          "description": "whether to insert whitespace and newline as pseudo-glyphs in result (at glyph level)",
+          "default": false
+        },
+        "alternative_decoding": {
+          "type": "boolean",
+          "description": "whether to process all TextEquiv alternatives, finding the best path via beam search, and delete each non-best alternative",
+          "default": true
+        },
+        "beam_width": {
+          "type": "number",
+          "format": "integer",
+          "description": "maximum number of best partial paths to consider during search with alternative_decoding",
+          "default": 100
         }
       }
     }

@@ -1,4 +1,4 @@
-ocrd >= 0.4.0
+ocrd >= 0.8.0
 click
 keras
 numpy
