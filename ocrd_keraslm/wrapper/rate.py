@@ -29,7 +29,7 @@ class KerasRate(Processor):
         if not hasattr(self, 'workspace') or not self.workspace: # no parameter/workspace for --dump-json or --version (no processing)
             return
         
-        self.rater = lib.Rater()
+        self.rater = lib.Rater(logger=logger)
         self.rater.load_config(self.parameter['config_file'])
         if self.rater.stateful: # override necessary before compilation:
             self.rater.length = 1 # allow single-sample batches
@@ -148,23 +148,29 @@ class KerasRate(Processor):
             if self.parameter['alternative_decoding']:
                 logger.info("Rating %d elements including its alternatives", len(text))
                 # initial state; todo: pass from previous page
-                next_fringe = [lib.Node(parent=None, state=None, value=b'\n'[0], cost=0.0, extras=None)]
+                next_fringe = [lib.Node(state=None, value='\n', cost=0.0)]
                 for element in text: # tuple of reference and list of its alternative textequivs
                     logger.debug("Rating '%s', combining %d new inputs with %d existing paths", element[0].id if element[0] else "space", len(element[1]), len(next_fringe))
                     fringe = next_fringe
                     next_fringe = []
                     for node in fringe:
                         new_nodes = [lib.Node(parent=node, state=node.state, value=node.value, cost=0.0, extras=(element[0], textequiv)) for textequiv in element[1]] # copies of node (keeping value+state until prediction)
-                        alternatives = [textequiv.Unicode.encode("utf-8") for textequiv in element[1]] # byte sequences
+                        alternatives = [textequiv.Unicode for textequiv in element[1]] # character sequences
                         for i in range(MAX_ELEMENTS): # accumulate states and costs of all alternatives (of different length) in node
                             updates = [j for j in range(len(element[1])) if i < len(alternatives[j])] # indices to update
                             if updates == []:
                                 break
-                            preds, states = self.rater.rate_single([new_nodes[u].value for u in updates], [new_nodes[u].state for u in updates])
+                            preds, states = self.rater.predict([new_nodes[u].value for u in updates], [new_nodes[u].state for u in updates])
                             for j, (new_node, alternative) in enumerate([(new_nodes[u], alternatives[u]) for u in updates]):
-                                new_node.value = alternative[i]
+                                char = alternative[i]
+                                if char not in self.rater.mapping[0]:
+                                    logger.error('unmapped character "%s" at input alternative %d of element %s', char, new_node.extras[1].index, new_node.extras[0].id)
+                                    idx = 0
+                                else:
+                                    idx = self.rater.mapping[0][char]
+                                new_node.value = char
                                 new_node.state = states[j]
-                                new_node.cum_cost += -log(max(preds[j][new_node.value], 1e-99), 2)
+                                new_node.cum_cost += -log(max(preds[j][idx], 1e-99), 2)
                         for new_node in new_nodes:
                             def history_clustering(next_fringe):
                                 for old_node in next_fringe:
@@ -197,19 +203,19 @@ class KerasRate(Processor):
                         textequivs = element.get_TextEquiv()
                         textequiv = node.extras[1]
                         element.set_TextEquiv([textequiv]) # delete others
-                        textequiv_len = len(textequiv.Unicode.encode("utf-8"))
+                        textequiv_len = len(textequiv.Unicode)
                         best_len += textequiv_len
                         textequiv.set_conf(pow(2.0, -(node.cum_cost-node.parent.cum_cost)/textequiv_len)) # average probability
                         #print(textequiv.Unicode, end='')
                     else:
                         best_len += 1
-                        #print(bytes([node.value]).decode("utf-8"), end='')
+                        #print(''.join([node.value]), end='')
                 #print('')
                 ent = best.cum_cost/best_len
                 avg = pow(2.0, -ent)
-                ppl = pow(2.0, ent) # byte level
+                ppl = pow(2.0, ent) # character level
                 ppll = pow(2.0, ent * best_len/best.length) # textequiv level (including spaces/newlines)
-                logger.info("avg: %.3f, byte ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # byte need not always equal glyph!
+                logger.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
             else:
                 textstring = u''.join(node[1][0].Unicode for node in text) # same length as text
                 logger.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
@@ -218,7 +224,7 @@ class KerasRate(Processor):
                 for node in text:
                     textequiv = node[1][0] # 1st choice only
                     j = len(textequiv.Unicode)
-                    conf = sum(confidences[i:i+j])/j
+                    conf = sum(confidences[i:i+j])/j # mean probability
                     textequiv.set_conf(conf) # todo: incorporate input confidences, too (weighted product or as input into LM)
                     i += j
                 if i != len(confidences):
@@ -227,7 +233,7 @@ class KerasRate(Processor):
                 ent = sum([-log(max(p, 1e-99), 2) for p in confidences])/len(confidences)
                 ppl = pow(2.0, ent) # character level
                 ppll = pow(2.0, ent * len(confidences)/len(text)) # textequiv level (including spaces/newlines)
-                logger.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # char need not always equal glyph!
+                logger.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
             ID = concat_padded(self.output_file_grp, n)
             self.workspace.add_file(
                 ID=ID,
