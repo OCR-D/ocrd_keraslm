@@ -12,14 +12,9 @@
       ],
       "description": "Rate each element of the text with a byte-level LSTM language model in Keras",
       "parameters": {
-        "weight_file": {
+        "model_file": {
           "type": "string",
-          "description": "path of h5 weight file for model trained with keraslm",
-          "required": true
-        },
-        "config_file": {
-          "type": "string",
-          "description": "path of pkl config file for model trained with keraslm",
+          "description": "path of h5py weight/config file for model trained with keraslm",
           "required": true
         },
         "textequiv_level": {

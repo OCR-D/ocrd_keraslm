@@ -26,6 +26,7 @@ setup(
         'click',
         'numpy',
         'tensorflow',
+        'h5py',
     ],
     package_data={
         '': ['*.json', '*.yml', '*.yaml'],

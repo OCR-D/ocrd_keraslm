@@ -3,3 +3,4 @@ click
 keras
 numpy
 tensorflow
+h5py

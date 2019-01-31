@@ -30,7 +30,7 @@ class KerasRate(Processor):
             return
         
         self.rater = lib.Rater(logger=logger)
-        self.rater.load_config(self.parameter['config_file'])
+        self.rater.load_config(self.parameter['model_file'])
         if self.rater.stateful: # override necessary before compilation:
             self.rater.length = 1 # allow single-sample batches
             self.rater.minibatch_size = self.rater.length # make sure states are consistent with windows after 1 minibatch
@@ -39,7 +39,7 @@ class KerasRate(Processor):
             self.rater.stateful = False # no implicit state transfer
             self.rater.incremental = True # but explicit state transfer
         self.rater.configure()
-        self.rater.load_weights(self.parameter['weight_file'])
+        self.rater.load_weights(self.parameter['model_file'])
     
     def process(self):
         """

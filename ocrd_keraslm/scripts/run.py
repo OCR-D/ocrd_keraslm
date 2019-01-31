@@ -16,14 +16,13 @@ def cli():
     pass
 
 @cli.command(short_help='train a language model')
-@click.option('-m', '--model', default="model.weights.h5", help='model weights file', type=click.Path(dir_okay=False, writable=True))
-@click.option('-c', '--config', default="model.config.pkl", help='model config file', type=click.Path(dir_okay=False, writable=True))
+@click.option('-m', '--model', default="model.h5", help='model file', type=click.Path(dir_okay=False, writable=True))
 @click.option('-w', '--width', default=128, help='number of nodes per hidden layer', type=click.IntRange(min=1, max=9128))
 @click.option('-d', '--depth', default=2, help='number of hidden layers', type=click.IntRange(min=1, max=10))
 @click.option('-l', '--length', default=256, help='number of previous characters seen (window size)', type=click.IntRange(min=1, max=1024))
 @click.option('-v', '--val-data', default=None, help='directory containing validation data files (no split)', type=click.Path(exists=True, dir_okay=True, file_okay=False))
 @click.argument('data', nargs=-1, type=click.File('r'))
-def train(model, config, width, depth, length, val_data, data):
+def train(model, width, depth, length, val_data, data):
     """Train a language model from DATA files,
        with parameters WIDTH, DEPTH, and LENGTH.
 
@@ -34,33 +33,33 @@ def train(model, config, width, depth, length, val_data, data):
     # train
     rater = lib.Rater()
     incremental = False
-    if os.path.isfile(model) and os.path.isfile(config):
-        rater.load_config(config)
+    if os.path.isfile(model):
+        rater.load_config(model)
         if rater.width == width and rater.depth == depth:
             incremental = True
+            print('loading weights from existing model for incremental training')
+        else:
+            print('warning: ignoring existing model due to different topology (width=%d, depth=%d)' % (rater.width, rater.depth), file=sys.stderr)
     rater.width = width
     rater.depth = depth
     rater.length = length
     
     rater.configure()
     if incremental:
-        print('loading weights for incremental training')
         rater.load_weights(model)
     if val_data:
         val_files = [os.path.join(val_data, f) for f in os.listdir(val_data)]
         val_data = [open(f, mode='r') for f in val_files if os.path.isfile(f)]
     rater.train(data, val_data=val_data)
-    
-    # save model and dicts
-    rater.save_config(config)
     assert rater.status == 2
-    rater.save_weights(model)
+    
+    # save model and config
+    rater.save(model)
 
 @cli.command(short_help='get individual probabilities from language model')
-@click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
-@click.option('-c', '--config', required=True, help='model config file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 @click.argument('text', type=click.STRING) # todo: create custom click.ParamType for graph/FST input
-def apply(model, config, text):
+def apply(model, text):
     """Apply a language model to TEXT string and compute its individual probabilities.
 
        If TEXT is the symbol '-', the string will be read from standard input.
@@ -68,7 +67,7 @@ def apply(model, config, text):
     
     # load model
     rater = lib.Rater()
-    rater.load_config(config)
+    rater.load_config(model)
     rater.configure()
     rater.load_weights(model)
     
@@ -86,15 +85,14 @@ def apply(model, config, text):
     #click.echo(json.dumps(zip(text, probs)))
 
 @cli.command(short_help='get overall perplexity from language model')
-@click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
-@click.option('-c', '--config', required=True, help='model config file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 @click.argument('data', nargs=-1, type=click.File('r'))
-def test(model, config, data):
+def test(model, data):
     """Apply a language model to DATA files and compute its overall perplexity."""
     
     # load model
     rater = lib.Rater()
-    rater.load_config(config)
+    rater.load_config(model)
     rater.configure()
     rater.load_weights(model)
     
@@ -103,17 +101,16 @@ def test(model, config, data):
     click.echo(perplexity)
 
 @cli.command(short_help='sample characters from language model')
-@click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
-@click.option('-c', '--config', required=True, help='model config file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 @click.option('-n', '--number', default=1, help='number of characters to sample', type=click.IntRange(min=1, max=10000))
 @click.argument('context', type=click.STRING)
 # todo: also allow specifying follow-up context
-def generate(model, config, number, context):
+def generate(model, number, context):
     """Apply a language model, generating the most probable characters (starting with CONTEXT string)."""
 
     # load model
     rater = lib.Rater()
-    rater.load_config(config)
+    rater.load_config(model)
     rater.stateful = False # no implicit state transfer
     rater.incremental = True # but explicit state transfer
     rater.configure()
@@ -149,13 +146,10 @@ def generate(model, config, number, context):
     click.echo(context[:-1] + result)
 
 @cli.command(short_help='print mapped charset')
-@click.option('-m', '--model', required=True, help='model weights file', type=click.Path(dir_okay=False, exists=True))
-@click.option('-c', '--config', required=True, help='model config file', type=click.Path(dir_okay=False, exists=True))
-def print_charset(model, config):
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
+def print_charset(model):
     rater = lib.Rater()
-    rater.load_config(config)
-    rater.configure()
-    rater.load_weights(model)
+    rater.load_config(model)
     rater.print_charset()
 
 

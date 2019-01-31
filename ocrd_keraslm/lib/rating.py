@@ -7,6 +7,7 @@ from math import log, exp, ceil
 import logging
 import click
 import numpy
+import h5py
 from keras.callbacks import Callback
 
 class Rater(object):
@@ -212,46 +213,49 @@ class Rater(object):
         else:
             self.status = 2
     
-    def save_config(self, configfilename):
-        '''Save parameters from configuration.
-
-        Save configured model parameters into `configfilename`.
-        '''
-        assert self.status > 0
-        config = {'width': self.width, 'depth': self.depth, 'length': self.length, 'stateful': self.stateful, 'variable_length': self.variable_length, 'mapping': self.mapping}
-        pickle.dump(config, open(configfilename, mode='wb'))
-    
-    def save_weights(self, weightfilename):
-        '''Save weights of the trained model.
-
-        Save trained model weights into `weightfilename`.
+    def save(self, filename):
+        '''Save weights of the trained model, and configuration parameters.
+        
+        Save both the configured parameters and the trained weights
+        of the model into `filename`.
         (This preserves weights across CPU/GPU implementations or input shape configurations.)
         '''
         assert self.status > 1
-        self.model.save_weights(weightfilename)
+        self.model.save_weights(filename)
+        with h5py.File(filename, 'a') as f:
+            g = f.create_group('config')
+            g.create_dataset('width', data=numpy.array(self.width))
+            g.create_dataset('depth', data=numpy.array(self.depth))
+            g.create_dataset('length', data=numpy.array(self.length))
+            g.create_dataset('stateful', data=numpy.array(self.stateful))
+            g.create_dataset('variable_length', data=numpy.array(self.variable_length))
+            g.create_dataset('mapping', data=numpy.fromiter((ord(self.mapping[1][i]) if i in self.mapping[1] else 0 for i in range(self.voc_size)), dtype='uint32'))
     
-    def load_config(self, configfilename):
+    def load_config(self, filename):
         '''Load parameters to prepare configuration/compilation.
 
-        Load model configuration from `configfilename`.
+        Load model configuration from `filename`.
         '''
         assert self.status == 0
-        config = pickle.load(open(configfilename, mode='rb'))
-        self.width = config['width']
-        self.depth = config['depth']
-        self.length = config['length']
-        self.stateful = config['stateful']
-        self.variable_length = config['variable_length']
-        self.mapping = config['mapping']
+        with h5py.File(filename, 'r') as f:
+            g = f['config']
+            self.width = g['width'][()]
+            self.depth = g['depth'][()]
+            self.length = g['length'][()]
+            self.stateful = g['stateful'][()]
+            self.variable_length = g['variable_length'][()]
+            c_i = dict((chr(c), i) for i, c in enumerate(g['mapping'][()]) if c > 0)
+            i_c = dict((i, chr(c)) for i, c in enumerate(g['mapping'][()]) if c > 0)
+            self.mapping = (c_i, i_c)
     
-    def load_weights(self, weightfilename):
+    def load_weights(self, filename):
         '''Load weights into the configured/compiled model.
 
-        Load weights from `weightfilename` into the compiled and configured model.
+        Load weights from `filename` into the compiled and configured model.
         (This preserves weights across CPU/GPU implementations or input shape configurations.)
         '''
         assert self.status > 0
-        self.model.load_weights(weightfilename)
+        self.model.load_weights(filename)
         self.status = 2
     
     def rate(self, text):
