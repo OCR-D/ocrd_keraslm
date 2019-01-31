@@ -4,6 +4,7 @@ import pickle
 import codecs
 from random import shuffle
 from math import log, exp, ceil
+import signal
 import logging
 import click
 import numpy
@@ -42,7 +43,6 @@ class Rater(object):
         self.stateful = True # keep states across batches within one text (implicit state transfer)
         self.mapping = ({},{}) # indexation of (known/allowed) input and output characters (i.e. vocabulary)
         # configuration constants
-        self.voc_size = 500 # maximum number of distinct characters allowed
         self.batch_size = 128 # will be overwritten by length if stateful
         self.validation_split = 0.2 # fraction of training data to use for validation (generalization control)
         # runtime variables
@@ -50,6 +50,7 @@ class Rater(object):
         self.incremental = False # whether compiled with additional (initial) input state and (final) output state (explicit state transfer)
         self.model = None
         self.status = 0 # empty / compiled / trained?
+        self.voc_size = 0 # (derived from mapping)
     
     def configure(self):
         '''Define and compile model for the given parameters.'''
@@ -66,7 +67,7 @@ class Rater(object):
         print('using', 'GPU' if has_cuda else 'CPU', 'LSTM implementation to compile',
               'stateful' if self.stateful else 'stateless',
               'incremental' if self.incremental else 'contiguous',
-              'model of depth', self.depth, 'width', self.width, 'length', self.length)
+              'model of depth', self.depth, 'width', self.width, 'length', self.length, 'size', self.voc_size)
         lstm = CuDNNLSTM if has_cuda else LSTM
         if self.stateful:
             self.batch_size = 1
@@ -80,7 +81,7 @@ class Rater(object):
             input_args = {'shape': (length,)} # batch size not fixed (e.g. different between training and prediction)
         input_args['dtype'] = 'int32'
         model_input = Input(**input_args)
-        model_output = Embedding(self.voc_size, 200)(model_input) # mask_zero=True does not work with CuDNNLSTM
+        model_output = Embedding(self.voc_size, self.width, name='char_embedding')(model_input) # mask_zero=True does not work with CuDNNLSTM
         for i in range(self.depth): # layer loop
             args = {'return_sequences': (i+1 < self.depth) or self.stateful, 'stateful': self.stateful}
             if not has_cuda:
@@ -96,9 +97,9 @@ class Rater(object):
                 layer = lstm(self.width, **args)
                 model_output = layer(model_output)
         if self.stateful:
-            layer = TimeDistributed(Dense(self.voc_size, activation='softmax'))
+            layer = TimeDistributed(Dense(self.voc_size, activation='softmax'), name='char_dense')
         else:
-            layer = Dense(self.voc_size, activation='softmax')
+            layer = Dense(self.voc_size, activation='softmax', name='char_dense')
         model_output = layer(model_output)
         if self.incremental:
             self.model = Model([model_input] + model_states_input, [model_output] + model_states_output)
@@ -123,10 +124,11 @@ class Rater(object):
         '''
         from keras.callbacks import EarlyStopping, ModelCheckpoint
         
-        assert self.status > 0 # incremental training is allowed
+        assert self.status > 0 # must be configured already, but incremental training is allowed
         assert self.incremental is False # no explicit state transfer
         
-        chars = set([])
+        # extract character mapping and calculate epoch size:
+        chars = set(self.mapping[0].keys())
         data = list(data)
         shuffle(data) # random order of files (because generators cannot shuffle within files)
         total_size = 0
@@ -138,6 +140,8 @@ class Rater(object):
             else:
                 split = ceil(len(data)*self.validation_split) # split position in randomized file list
                 training_data, validation_data = data[:-split], data[-split:] # reserve last files for validation
+            assert len(training_data) > 0, "stateful mode needs at least one file for training"
+            assert len(validation_data) > 0, "stateful mode needs at least one file for validation"
             for file in validation_data:
                 print('using input', file.name, 'for validation only')
             training_epoch_size = 0
@@ -186,20 +190,50 @@ class Rater(object):
             if self.variable_length:
                 training_epoch_size *= 1.1 # training data augmented with partial windows (1+subsampling ratio)
         chars = sorted(list(chars))
+        self.voc_size = len(chars) + 1 # reserve 0 for padding
         c_i = dict((c, i) for i, c in enumerate(chars, 1))
         i_c = dict((i, c) for i, c in enumerate(chars, 1))
         self.mapping = (c_i, i_c)
-        if len(c_i) > self.voc_size:
-            raise Exception('number of characters found (%d) exceeds vocab size (%d)', len(c_i), self.voc_size)
-        print('training on %d files / %d batches per epoch / %d character tokens for %d character types' % (len(training_data), training_epoch_size, total_size, len(c_i)))
+        print('training on %d files / %d batches per epoch / %d character tokens for %d character types' % (len(training_data), training_epoch_size, total_size, self.voc_size))
+        
+        # update mapping-specific layers:
+        embedding = self.model.get_layer(name='char_embedding')
+        dense = self.model.get_layer(name='char_dense')
+        if (embedding.input_dim < self.voc_size or
+            dense.output_shape[2] < self.voc_size): # more chars than during last training?
+            if self.status >= 2: # weights exist already (i.e. incremental training)?
+                print('transferring weights from previous model with only %d character types' % embedding.input_dim)
+                # get old weights:
+                layer_weights = [layer.get_weights() for layer in self.model.layers]
+                # reconfigure with new mapping size (and new initializers):
+                self.configure()
+                # set old weights:
+                for layer, weights in zip(self.model.layers, layer_weights):
+                    if layer.name == 'char_embedding':
+                        # transfer weights from previous Embedding layer to new one:
+                        new_weights = layer.get_weights()
+                        new_weights[0][0:embedding.input_dim, 0:embedding.output_dim] = weights[0]
+                        layer.set_weights(new_weights)
+                    elif layer.name == 'char_dense':
+                        # transfer kernel and bias weights from previous Dense layer to new one:
+                        new_weights = layer.get_weights()
+                        new_weights[0][0:dense.input_shape[2], 0:dense.output_shape[2]] = weights[0]
+                        new_weights[1][0:dense.output_shape[2]] = weights[1]
+                        layer.set_weights(new_weights)
+                    else:
+                        # use old weights:
+                        layer.set_weights(weights)
+            else:
+                self.configure()
         
         # fit model
-        best_filename = os.path.join(tempfile.mkdtemp(), 'model_last.weights.h5')
-        callbacks = [EarlyStopping(monitor='val_loss', patience=3, verbose=1),
-                     ModelCheckpoint(best_filename, monitor='val_loss', # to be able to replay long epochs (crash/overfitting)
-                                     save_best_only=True, save_weights_only=True, mode='min')]
+        callbacks = [EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True)]
         if self.stateful:
             callbacks.append(reset_cb)
+        def stopper(sig, frame):
+            print('stopping training')
+            self.model.stop_training = True
+        signal.signal(signal.SIGINT, stopper)
         self.model.fit_generator(self.gen_data_from_files(training_data, steps, split=split, train=reset_cb if self.stateful else True, repeat=True),
                                  steps_per_epoch=training_epoch_size, epochs=100,
                                  workers=1, use_multiprocessing=True,
@@ -207,11 +241,7 @@ class Rater(object):
                                  validation_steps=validation_epoch_size,
                                  verbose=1, callbacks=callbacks)
         # set state
-        if os.path.isfile(best_filename):
-            self.load_weights(best_filename) # prefer best-performing over last checkpoint
-            os.unlink(best_filename)
-        else:
-            self.status = 2
+        self.status = 2
     
     def save(self, filename):
         '''Save weights of the trained model, and configuration parameters.
@@ -247,6 +277,8 @@ class Rater(object):
             c_i = dict((chr(c), i) for i, c in enumerate(g['mapping'][()]) if c > 0)
             i_c = dict((i, chr(c)) for i, c in enumerate(g['mapping'][()]) if c > 0)
             self.mapping = (c_i, i_c)
+            self.voc_size = len(c_i) + 1
+        self.status = 1
     
     def load_weights(self, filename):
         '''Load weights into the configured/compiled model.
@@ -317,7 +349,7 @@ class Rater(object):
         assert self.status > 1
         assert self.stateful is False # no implicit state transfer
         assert self.incremental is True # only explicit state transfer
-        assert len(candidates) == len(initial_states)
+        assert len(candidates) == len(initial_states), "number of inputs (%d) and number of states (%d) inconsistent" % (len(candidates), len(initial_states))
         n = len(candidates)
         inputs = numpy.zeros((n, 1), dtype=numpy.uint32)
         for i in range(n):
@@ -504,11 +536,9 @@ class Rater(object):
         else:
             y = numpy.zeros((batch_size, self.voc_size), dtype=numpy.bool)
         for k, sequence in enumerate(inputs):
-            if k >= batch_size:
-                raise Exception('input sequence %d (%s) exceeds batch size', k, sequence)
+            assert k < batch_size, 'input sequence %d (%s) exceeds batch size' % (k, sequence)
             for t, char in enumerate(sequence):
-                if t >= length:
-                    raise Exception('input sequence %d (%s) exceeds window length', t, sequence)
+                assert t < length, 'input sequence %d (%s) exceeds window length' % (t, sequence)
                 if char not in self.mapping[0]:
                     self.logger.error('unmapped character "%s" at input position %d', char, t + k * length)
                     idx = 0
@@ -533,9 +563,9 @@ class Rater(object):
     
     def print_charset(self):
         '''Print the mapped characters, newline-separated.'''
-        assert self.status > 1
-        for c in self.mapping[1].values():
-            print(c)
+        assert self.status > 0
+        for i, c in self.mapping[1].items():
+            print('%d: "%s"' % (i, c))
 
 class ResetStatesCallback(Callback):
     '''Keras callback for stateful models to reset state between files.
