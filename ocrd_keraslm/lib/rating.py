@@ -54,7 +54,7 @@ class Rater(object):
     
     def configure(self):
         '''Define and compile model for the given parameters.'''
-        from keras.layers import Dense, TimeDistributed, Input, Embedding
+        from keras.layers import Dense, TimeDistributed, Input, Embedding, Lambda
         from keras.layers import LSTM, CuDNNLSTM
         from keras import backend as K
         from keras.models import Model
@@ -81,7 +81,8 @@ class Rater(object):
             input_args = {'shape': (length,)} # batch size not fixed (e.g. different between training and prediction)
         input_args['dtype'] = 'int32'
         model_input = Input(**input_args)
-        model_output = Embedding(self.voc_size, self.width, name='char_embedding')(model_input) # mask_zero=True does not work with CuDNNLSTM
+        embedding = Embedding(self.voc_size, self.width, name='char_embedding')
+        model_output = embedding(model_input) # mask_zero=True does not work with CuDNNLSTM
         for i in range(self.depth): # layer loop
             args = {'return_sequences': (i+1 < self.depth) or self.stateful, 'stateful': self.stateful}
             if not has_cuda:
@@ -97,9 +98,9 @@ class Rater(object):
                 layer = lstm(self.width, **args)
                 model_output = layer(model_output)
         if self.stateful:
-            layer = TimeDistributed(Dense(self.voc_size, activation='softmax'), name='char_dense')
+            layer = TimeDistributed(Lambda(lambda x: K.softmax(K.dot(x, K.transpose(embedding.embeddings)))))
         else:
-            layer = Dense(self.voc_size, activation='softmax', name='char_dense')
+            Lambda(lambda x: K.softmax(K.dot(x, K.transpose(embedding.embeddings))))
         model_output = layer(model_output)
         if self.incremental:
             self.model = Model([model_input] + model_states_input, [model_output] + model_states_output)
@@ -198,9 +199,8 @@ class Rater(object):
         
         # update mapping-specific layers:
         embedding = self.model.get_layer(name='char_embedding')
-        dense = self.model.get_layer(name='char_dense')
-        if (embedding.input_dim < self.voc_size or
-            dense.output_shape[2] < self.voc_size): # more chars than during last training?
+        #dense = self.model.get_layer(name='char_dense')
+        if embedding.input_dim < self.voc_size: # more chars than during last training?
             if self.status >= 2: # weights exist already (i.e. incremental training)?
                 print('transferring weights from previous model with only %d character types' % embedding.input_dim)
                 # get old weights:
