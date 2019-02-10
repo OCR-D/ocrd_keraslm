@@ -19,16 +19,17 @@ class Rater(object):
     topology (layers depth, per-layer width, window length) can
     be controlled before training.
     
-    To be used by stand-alone CLI (`scripts.train` for training,
-    `scripts.apply` for prediction, `scripts.test` for evaluation),
-    or OCR-D processing (`wrapper.ocrd_keraslm_rate`).
+    To be used by stand-alone CLI (`scripts.run.train` for training,
+    `scripts.run.test` for evaluation, `scripts.run.generate` for
+    generation, `scripts.run.apply` for prediction), 
+    or OCR-D processing (`wrapper.rate`).
     
     Interfaces:
-    - `Rater.train`/`scripts.train` : file handles of character sequences
-    - `Rater.test`/`scripts.test` : file handles of character sequences
-    - `Rater.rate`/`scripts.apply` : character string
-    - `Rater.rate_once`/`wrapper.ocrd_keraslm_rate` : character string
-    - `Rater.rate_single`/`scripts.generate` or `wrapper.ocrd_keraslm_rate` :
+    - `Rater.train`/`scripts.run.train` : file handles of character sequences
+    - `Rater.test`/`scripts.run.test` : file handles of character sequences
+    - `Rater.rate`/`scripts.run.apply` : character string
+    - `Rater.rate_once`/`wrapper.rate` : character string
+    - `Rater.rate_single`/`scripts.run.generate` or `wrapper.rate` :
       alternative list of characters and states
     '''
     
@@ -46,29 +47,36 @@ class Rater(object):
         self.batch_size = 128 # will be overwritten by length if stateful
         self.validation_split = 0.2 # fraction of training data to use for validation (generalization control)
         # runtime variables
-        self.logger = logger or logging.getLogger('')
+        logging.basicConfig(level=logging.DEBUG)
+        self.logger = logger or logging.getLogger(__name__)
+        self.reset_cb = None # ResetStatesCallback instance in stateful training
         self.incremental = False # whether compiled with additional (initial) input state and (final) output state (explicit state transfer)
-        self.model = None
-        self.status = 0 # empty / compiled / trained?
-        self.voc_size = 0 # (derived from mapping)
+        self.model = None # (assigned by configure)
+        self.status = 0 # empty / configured / trained?
+        self.voc_size = 0 # (derived from mapping after loading or preparing training)
     
     def configure(self):
         '''Define and compile model for the given parameters.'''
-        from keras.layers import Dense, TimeDistributed, Input, Embedding, Lambda
-        from keras.layers import LSTM, CuDNNLSTM
-        from keras import backend as K
+        from keras.layers import Dense, TimeDistributed, Input
+        from keras.layers import Embedding, Lambda, Concatenate
+        from keras.layers import LSTM, CuDNNLSTM, Dropout
         from keras.models import Model
-
+        from keras.optimizers import Adam
+        from keras import backend as K
+        
         if self.stateful:
             self.variable_length = False # (to avoid inconsistency)
         length = None if self.variable_length else self.length
         # automatically switch to CuDNNLSTM if CUDA GPU is available:
         has_cuda = K.backend() == 'tensorflow' and K.tensorflow_backend._get_available_gpus()
-        print('using', 'GPU' if has_cuda else 'CPU', 'LSTM implementation to compile',
-              'stateful' if self.stateful else 'stateless',
-              'incremental' if self.incremental else 'contiguous',
-              'model of depth', self.depth, 'width', self.width, 'length', self.length, 'size', self.voc_size)
+        self.logger.info('using %s LSTM implementation to compile %s %s model of depth %d width %d length %d size %d',
+                         'GPU' if has_cuda else 'CPU',
+                         'stateful' if self.stateful else 'stateless',
+                         'incremental' if self.incremental else 'contiguous',
+                         self.depth, self.width, self.length, self.voc_size)
         lstm = CuDNNLSTM if has_cuda else LSTM
+        
+        # batch size and window length:
         if self.stateful:
             self.batch_size = 1
             input_args = {'batch_shape': (self.batch_size, None)} # batch size must be constant, variable length
@@ -97,17 +105,32 @@ class Rater(object):
             else:
                 layer = lstm(self.width, **args)
                 model_output = layer(model_output)
+            if i > 0: # only hidden-to-hidden layer:
+                constant_shape = (self.batch_size, 1, self.width) # variational dropout (time-constant)
+                # LSTM (but not CuDNNLSTM) has the (non-recurrent) dropout keyword option for this:
+                model_output = Dropout(0.1, noise_shape=constant_shape)(model_output)
+        
+        # output layer:
+        def char_output(h):
+            # re-use input embedding (weight tying), but add a bias vector, and also add a linear projection in hidden space
+            # (see Press & Wolf 2017)
+            # y = softmax( V * P * h + b ) with V=U the input embedding; initialise P as identity matrix and b as zero
+            proj = K.variable(numpy.eye(self.width), name='char_output_projection') # trainable=True by default
+            bias = K.variable(numpy.zeros((self.voc_size,)), name='char_output_bias') # trainable=True by default
+            return K.softmax(K.dot(h, K.transpose(K.dot(embedding.embeddings, proj))) + bias)
+            # simplified variant with no extra weights:
+            #return K.softmax(K.dot(h, K.transpose(embedding.embeddings)))
         if self.stateful:
-            layer = TimeDistributed(Lambda(lambda x: K.softmax(K.dot(x, K.transpose(embedding.embeddings)))))
+            layer = TimeDistributed(Lambda(char_output), name='char_output')
         else:
-            Lambda(lambda x: K.softmax(K.dot(x, K.transpose(embedding.embeddings))))
+            layer = Lambda(char_output, name='char_output')
         model_output = layer(model_output)
+        
         if self.incremental:
             self.model = Model([model_input] + model_states_input, [model_output] + model_states_output)
         else:
             self.model = Model(model_input, model_output)
-        self.model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-        
+        self.model.compile(loss='categorical_crossentropy', optimizer=Adam(clipnorm=1.0), metrics=['accuracy']) # 'adam'
         self.status = 1
     
     def train(self, data, val_data=None):
@@ -123,8 +146,12 @@ class Rater(object):
         If `val_data` is given, then do not split, but use those files
         for validation instead (regardless of mode).
         '''
-        from keras.callbacks import EarlyStopping, ModelCheckpoint
-        
+        from keras.callbacks import EarlyStopping, TerminateOnNaN
+        # uncomment the following lines to enter tfdbg during training:
+        #from keras import backend as K
+        #from tensorflow.python import debug as tf_debug
+        #K.set_session(tf_debug.LocalCLIDebugWrapperSession(K.get_session()))
+
         assert self.status > 0 # must be configured already, but incremental training is allowed
         assert self.incremental is False # no explicit state transfer
         
@@ -144,7 +171,7 @@ class Rater(object):
             assert len(training_data) > 0, "stateful mode needs at least one file for training"
             assert len(validation_data) > 0, "stateful mode needs at least one file for validation"
             for file in validation_data:
-                print('using input', file.name, 'for validation only')
+                self.logger.info('using input %s for validation only', file.name)
             training_epoch_size = 0
             for file in training_data:
                 text = file.read()
@@ -160,7 +187,6 @@ class Rater(object):
                 validation_epoch_size += ceil((size-self.length)/steps/self.batch_size)
                 chars.update(set(text))
             split = None
-            reset_cb = ResetStatesCallback()
         else: # we can split window by window in stateless mode
             steps = 3
             max_size = 0
@@ -195,30 +221,25 @@ class Rater(object):
         c_i = dict((c, i) for i, c in enumerate(chars, 1))
         i_c = dict((i, c) for i, c in enumerate(chars, 1))
         self.mapping = (c_i, i_c)
-        print('training on %d files / %d batches per epoch / %d character tokens for %d character types' % (len(training_data), training_epoch_size, total_size, self.voc_size))
+        self.logger.info('training on %d files / %d batches per epoch / %d character tokens for %d character types' % (len(training_data), training_epoch_size, total_size, self.voc_size))
         
         # update mapping-specific layers:
         embedding = self.model.get_layer(name='char_embedding')
-        #dense = self.model.get_layer(name='char_dense')
         if embedding.input_dim < self.voc_size: # more chars than during last training?
             if self.status >= 2: # weights exist already (i.e. incremental training)?
-                print('transferring weights from previous model with only %d character types' % embedding.input_dim)
+                self.logger.warning('transferring weights from previous model with only %d character types' % embedding.input_dim)
                 # get old weights:
                 layer_weights = [layer.get_weights() for layer in self.model.layers]
                 # reconfigure with new mapping size (and new initializers):
                 self.configure()
                 # set old weights:
                 for layer, weights in zip(self.model.layers, layer_weights):
+                    self.logger.debug('transferring weights for layer %s %s', layer.name, str([w.shape for w in weights]))
                     if layer.name == 'char_embedding':
                         # transfer weights from previous Embedding layer to new one:
-                        new_weights = layer.get_weights()
+                        new_weights = layer.get_weights() # freshly initialised
+                        #new_weights[0][embedding.input_dim:, 0:embedding.output_dim] = weights[0][0,:] # repeat zero vector instead
                         new_weights[0][0:embedding.input_dim, 0:embedding.output_dim] = weights[0]
-                        layer.set_weights(new_weights)
-                    elif layer.name == 'char_dense':
-                        # transfer kernel and bias weights from previous Dense layer to new one:
-                        new_weights = layer.get_weights()
-                        new_weights[0][0:dense.input_shape[2], 0:dense.output_shape[2]] = weights[0]
-                        new_weights[1][0:dense.output_shape[2]] = weights[1]
                         layer.set_weights(new_weights)
                     else:
                         # use old weights:
@@ -227,21 +248,26 @@ class Rater(object):
                 self.configure()
         
         # fit model
-        callbacks = [EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True)]
+        callbacks = [EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True),
+                     TerminateOnNaN(),
+                     StopSignalCallback(signal.SIGINT)]
         if self.stateful:
-            callbacks.append(reset_cb)
-        def stopper(sig, frame):
-            print('stopping training')
-            self.model.stop_training = True
-        signal.signal(signal.SIGINT, stopper)
-        self.model.fit_generator(self.gen_data_from_files(training_data, steps, split=split, train=reset_cb if self.stateful else True, repeat=True),
+            self.reset_cb = ResetStatesCallback()
+            callbacks.append(self.reset_cb)
+        history = self.model.fit_generator(self.gen_data_from_files(training_data, steps, split=split, train=True, repeat=True),
                                  steps_per_epoch=training_epoch_size, epochs=100,
-                                 workers=1, use_multiprocessing=True,
+                                 workers=1, use_multiprocessing=False, # True makes communication with reset callback impossible
                                  validation_data=self.gen_data_from_files(validation_data, steps, split=split, train=False, repeat=True),
                                  validation_steps=validation_epoch_size,
                                  verbose=1, callbacks=callbacks)
         # set state
-        self.status = 2
+        if numpy.isnan(history.history['loss'][0]):
+            self.logger.critical('training failed (NaN loss)')
+            self.status = 1
+        else:
+            if 'val_loss' in history.history:
+                self.logger.info('training finished with val_loss %f', min(history.history['val_loss']))
+            self.status = 2
     
     def save(self, filename):
         '''Save weights of the trained model, and configuration parameters.
@@ -278,7 +304,6 @@ class Rater(object):
             i_c = dict((i, chr(c)) for i, c in enumerate(g['mapping'][()]) if c > 0)
             self.mapping = (c_i, i_c)
             self.voc_size = len(c_i) + 1
-        self.status = 1
     
     def load_weights(self, filename):
         '''Load weights into the configured/compiled model.
@@ -563,9 +588,37 @@ class Rater(object):
     
     def print_charset(self):
         '''Print the mapped characters, newline-separated.'''
-        assert self.status > 0
         for i, c in self.mapping[1].items():
             print('%d: "%s"' % (i, c))
+
+class StopSignalCallback(Callback):
+    '''Keras callback for graceful interruption of training.
+    
+    Halts training prematurely at the end of the current batch
+    when the given signal was received once. If the callback
+    gets to receive the signal again, exits immediately.
+    '''
+    
+    def __init__(self, sig=signal.SIGINT):
+        super(StopSignalCallback, self).__init__()
+        self.received = False
+        self.sig = sig
+        self.logger = logging.getLogger(__name__)
+        def stopper(sig, frame):
+            if self.received: # called again?
+                self.logger.critical('interrupting')
+                exit(0)
+            else:
+                self.logger.critical('stopping training')
+                self.received = True
+        self.action = signal.signal(self.sig, stopper)
+    
+    def __del__(self):
+        signal.signal(self.sig, self.action)
+    
+    def on_batch_end(self, batch, logs):
+        if self.received:
+            self.model.stop_training = True
 
 class ResetStatesCallback(Callback):
     '''Keras callback for stateful models to reset state between files.
@@ -578,23 +631,26 @@ class ResetStatesCallback(Callback):
         super(ResetStatesCallback, self).__init__()
         self.eof = False
         self.here = ''
-        self.next = ''
+        self.there = ''
+        self.logger = logging.getLogger(__name__)
     
     def reset(self, where):
         '''Reset the model after the end of the current batch.'''
         self.eof = True
-        self.next = where
+        self.there = where
     
     def on_batch_begin(self, batch, logs=None):
         if self.eof:
             # between training files
             self.model.reset_states()
             self.eof = False
-            self.here = self.next
+            self.here = self.there
     
     def on_batch_end(self, batch, logs=None):
         if logs.get('loss') > 25:
-            print('huge loss in', self.here, 'at', batch)
+            self.logger.warning('huge loss in "%s" at %d', self.here, batch)
+        if numpy.isnan(logs.get('loss')):
+            self.logger.critical('NaN loss in "%s" at %d', self.here, batch)
         if (self.params['do_validation'] and batch >= self.params['steps']-1):
             # in fit_generator just before evaluate_generator
             self.model.reset_states()
