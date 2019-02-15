@@ -106,7 +106,10 @@ class Rater(object):
                 layer = lstm(self.width, **args)
                 model_output = layer(model_output)
             if i > 0: # only hidden-to-hidden layer:
-                constant_shape = (self.batch_size, 1, self.width) # variational dropout (time-constant)
+                if self.stateful:
+                    constant_shape = (self.batch_size, 1, self.width) # variational dropout (time-constant)
+                else:
+                    constant_shape = (1, self.width) # variational dropout (time-constant)
                 # LSTM (but not CuDNNLSTM) has the (non-recurrent) dropout keyword option for this:
                 model_output = Dropout(0.1, noise_shape=constant_shape)(model_output)
         
@@ -115,11 +118,11 @@ class Rater(object):
             # re-use input embedding (weight tying), but add a bias vector, and also add a linear projection in hidden space
             # (see Press & Wolf 2017)
             # y = softmax( V * P * h + b ) with V=U the input embedding; initialise P as identity matrix and b as zero
-            proj = K.variable(numpy.eye(self.width), name='char_output_projection') # trainable=True by default
-            bias = K.variable(numpy.zeros((self.voc_size,)), name='char_output_bias') # trainable=True by default
-            return K.softmax(K.dot(h, K.transpose(K.dot(embedding.embeddings, proj))) + bias)
-            # simplified variant with no extra weights:
-            #return K.softmax(K.dot(h, K.transpose(embedding.embeddings)))
+            #proj = K.variable(numpy.eye(self.width), name='char_output_projection') # trainable=True by default
+            #bias = K.variable(numpy.zeros((self.voc_size,)), name='char_output_bias') # trainable=True by default
+            #return K.softmax(K.dot(h, K.transpose(K.dot(char_embedding.embeddings, proj))) + bias)
+            # simplified variant with no extra weights (50% faster, equally accurate):
+            return K.softmax(K.dot(h, K.transpose(char_embedding.embeddings)))
         if self.stateful:
             layer = TimeDistributed(Lambda(char_output), name='char_output')
         else:
@@ -130,7 +133,11 @@ class Rater(object):
             self.model = Model([model_input] + model_states_input, [model_output] + model_states_output)
         else:
             self.model = Model(model_input, model_output)
-        self.model.compile(loss='categorical_crossentropy', optimizer=Adam(clipnorm=1.0), metrics=['accuracy']) # 'adam'
+        
+        # does not converge: clipnorm=1...5, lr=1e-4
+        # slower to converge, not better: amsgrad=True, decay=1e-2...1e-6
+        # for transfer of old models without NaN losses: epsilon=0.1
+        self.model.compile(loss='categorical_crossentropy', optimizer=Adam(clipvalue=5.0), metrics=['accuracy']) # 'adam'
         self.status = 1
     
     def train(self, data, val_data=None):
@@ -221,13 +228,14 @@ class Rater(object):
         c_i = dict((c, i) for i, c in enumerate(chars, 1))
         i_c = dict((i, c) for i, c in enumerate(chars, 1))
         self.mapping = (c_i, i_c)
-        self.logger.info('training on %d files / %d batches per epoch / %d character tokens for %d character types' % (len(training_data), training_epoch_size, total_size, self.voc_size))
+        self.logger.info('training on %d files / %d batches per epoch / %d character tokens for %d character types',
+                         len(training_data), training_epoch_size, total_size, self.voc_size)
         
         # update mapping-specific layers:
         embedding = self.model.get_layer(name='char_embedding')
         if embedding.input_dim < self.voc_size: # more chars than during last training?
             if self.status >= 2: # weights exist already (i.e. incremental training)?
-                self.logger.warning('transferring weights from previous model with only %d character types' % embedding.input_dim)
+                self.logger.warning('transferring weights from previous model with only %d character types', embedding.input_dim)
                 # get old weights:
                 layer_weights = [layer.get_weights() for layer in self.model.layers]
                 # reconfigure with new mapping size (and new initializers):
