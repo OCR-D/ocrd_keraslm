@@ -5,11 +5,9 @@ import os
 import sys
 import codecs
 import logging
-from bisect import insort_left
 from math import ceil
 import json
 import click
-import numpy
 
 from ocrd_keraslm import lib
 
@@ -62,7 +60,7 @@ def train(model, width, depth, length, val_data, data):
     if val_data:
         val_files = [os.path.join(val_data, f) for f in os.listdir(val_data)]
         val_data = [open(f, mode='r') for f in val_files if os.path.isfile(f)]
-    rater.train(data, val_data=val_data)
+    rater.train(list(data), val_data=val_data)
     assert rater.status == 2
     
     # save model and config
@@ -89,12 +87,12 @@ def apply(model, text, context):
     if context:
         context = list(map(lambda x: ceil(int(x)/10), context.split(' ')))
     
-    ratings, perplexity = rater.rate(text, context)
+    ratings, perplexity = rater.rate2(text, context)
     click.echo(perplexity)
     click.echo(json.dumps(ratings, ensure_ascii=False))
     # much faster:
-    #probs = rater.rate_once(text)
-    #click.echo(json.dumps(zip(text, probs)))
+    #probs = rater.rate(text)
+    #click.echo(json.dumps(zip(text, probs), ensure_ascii=False))
 
 @cli.command(short_help='get overall perplexity from language model')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
@@ -133,34 +131,8 @@ def generate(model, number, prefix, context):
         context = list(map(lambda x: ceil(int(x)/10), context.split(' ')))
     else:
         context = rater.underspecify_contexts()
-        
-    # initial state
-    prefix_states = [None]
-    # prefix (to get correct initial state)
-    for char in prefix[:-1]: # all but last character
-        _, prefix_states = rater.predict([char], prefix_states, context=context)
-    next_fringe = [lib.Node(state=prefix_states[0],
-                            value=prefix[-1], # last character
-                            cost=0.0)]
-    # beam search
-    for _ in range(0, number): # iterate over number of characters to be generated
-        fringe = next_fringe
-        preds, states = rater.predict([n.value for n in fringe], [n.state for n in fringe], context=context)
-        next_fringe = []
-        for j, n in enumerate(fringe): # iterate over batch
-            pred = preds[j]
-            pred_best = numpy.argsort(pred)[-10:] # keep only 10-best alternatives
-            pred_best = pred_best[numpy.searchsorted(pred[pred_best], 0.004):] # keep only alternatives better than 1/256 (uniform distribution)
-            costs = -numpy.log(pred[pred_best])
-            state = states[j]
-            for best, cost in zip(pred_best, costs): # follow up on best predictions
-                if best not in rater.mapping[1]: # avoid zero/unmapped
-                    continue # ignore this alternative
-                n_new = lib.Node(parent=n, state=state, value=rater.mapping[1][best], cost=cost)
-                insort_left(next_fringe, n_new) # add alternative to tree
-        next_fringe = next_fringe[:256] # keep 256-best paths (equals batch size)
-    best = next_fringe[0] # best-scoring
-    result = ''.join([n.value for n in best.to_sequence()])
+    
+    result = rater.generate(prefix, number, context)
     click.echo(prefix[:-1] + result)
 
 @cli.command(short_help='Print the mapped characters')

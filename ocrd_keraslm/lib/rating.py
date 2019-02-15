@@ -1,13 +1,12 @@
 import os
-import tempfile
-import pickle
 import codecs
 from random import shuffle
 from math import log, exp, ceil
+from bisect import insort_left
 import signal
 import logging
 import click
-import numpy
+import numpy as np
 import h5py
 from keras.callbacks import Callback
 
@@ -21,7 +20,7 @@ class Rater(object):
     
     To be used by stand-alone CLI (`scripts.run.train` for training,
     `scripts.run.test` for evaluation, `scripts.run.generate` for
-    generation, `scripts.run.apply` for prediction), 
+    generation, `scripts.run.apply` for prediction),
     or OCR-D processing (`wrapper.rate`).
     
     Interfaces:
@@ -42,7 +41,7 @@ class Rater(object):
         self.length = 0 # number of backpropagation timesteps per LSTM cell
         self.variable_length = True # also train on partially filled windows
         self.stateful = True # keep states across batches within one text (implicit state transfer)
-        self.mapping = ({},{}) # indexation of (known/allowed) input and output characters (i.e. vocabulary)
+        self.mapping = ({}, {}) # indexation of (known/allowed) input and output characters (i.e. vocabulary)
         # configuration constants
         self.batch_size = 128 # will be overwritten by length if stateful
         self.validation_split = 0.2 # fraction of training data to use for validation (generalization control)
@@ -95,27 +94,26 @@ class Rater(object):
         char_input = Input(**input_args, name='char_input')
         char_embedding = Embedding(self.voc_size, self.width, # (self.width - context_width)
                                    embeddings_initializer=RandomNormal(stddev=0.001),
-                                   embeddings_regularizer=self.regularise_chars, # see below
+                                   embeddings_regularizer=self._regularise_chars, # see below
                                    name='char_embedding')
-        char_output = char_embedding(char_input) # mask_zero=True does not work with CuDNNLSTM
+        char_hidden = char_embedding(char_input) # mask_zero=True does not work with CuDNNLSTM
         
         context_inputs = [Input(**input_args, name='context1_input')] # context variable year # todo: author etc (meta-data)
         context_embeddings = [Embedding(200, 10, # year/10 from 0 to 2000 AD; 10 outdim seems fair
                                         embeddings_initializer=RandomNormal(stddev=0.001),
-                                        embeddings_regularizer=self.regularise_contexts, # crucial, see below
+                                        embeddings_regularizer=self._regularise_contexts, # crucial, see below
                                         name='context1_embedding')]
+        context_hiddens = [e(v) for v, e in zip(context_inputs, context_embeddings)]
+        #context_width = sum(int(c.shape[-1]) for c in context_hiddens) # dimensionality of context vector
+        
         # places to be modified as well when adding more contexts here:
         # * underspecify_contexts() -- calculation of default
-        # * gen_data_from_files() -- calculation from filename
+        # * _gen_data_from_files() -- calculation from filename
         # * train() -- incremental training on older models with fewer contexts
         # * data preparation in scripts.run.generate/apply and wrapper.rate
         
-        context_outputs = [e(v) for v, e in zip(context_inputs, context_embeddings)]
-        #context_width = sum(int(c.shape[-1]) for c in context_outputs) # dimensionality of context vector
-        hidden_input = Concatenate(name='concat_hidden_input')([char_output] + context_outputs)
-        
         # hidden layers:
-        model_output = hidden_input
+        model_output = Concatenate(name='concat_hidden_input')([char_hidden] + context_hiddens)
         for i in range(self.depth): # layer loop
             args = {'return_sequences': (i+1 < self.depth) or self.stateful,
                     'stateful': self.stateful,
@@ -149,8 +147,8 @@ class Rater(object):
             # re-use input embedding (weight tying), but add a bias vector, and also add a linear projection in hidden space
             # (see Press & Wolf 2017)
             # y = softmax( V * P * h + b ) with V=U the input embedding; initialise P as identity matrix and b as zero
-            #proj = K.variable(numpy.eye(self.width), name='char_output_projection') # trainable=True by default
-            #bias = K.variable(numpy.zeros((self.voc_size,)), name='char_output_bias') # trainable=True by default
+            #proj = K.variable(np.eye(self.width), name='char_output_projection') # trainable=True by default
+            #bias = K.variable(np.zeros((self.voc_size,)), name='char_output_bias') # trainable=True by default
             #return K.softmax(K.dot(h, K.transpose(K.dot(char_embedding.embeddings, proj))) + bias)
             # simplified variant with no extra weights (50% faster, equally accurate):
             return K.softmax(K.dot(h, K.transpose(char_embedding.embeddings)))
@@ -177,8 +175,8 @@ class Rater(object):
         self.logger.info('using underspecification (zero) for %d context variables', ncontexts)
         return [0] * ncontexts
     
-    def regularise_contexts(self, embedding_matrix):
-        '''Calculate losses in a context embedding layer to control for
+    def _regularise_contexts(self, embedding_matrix):
+        '''Calculate L2 loss of some context embedding weights to control for
         - low rank of the embedding matrix,
         - smoothness of adjacent embedding vectors,
         - underspecification at zero
@@ -203,9 +201,9 @@ class Rater(object):
         # todo: find good relative weights between these subtargets
         return self.smoothing * (lowrank + smoothness + underspecification)
     
-    def regularise_chars(self, embedding_matrix):
-        '''Calculate losses in the char embedding layer 
-        to control for underspecification at zero 
+    def _regularise_chars(self, embedding_matrix):
+        '''Calculate L2 loss of the char embedding weights
+        to control for underspecification at zero
         (by interpolating between other embedding vectors).
         '''
         from keras import backend as K
@@ -248,10 +246,43 @@ class Rater(object):
         assert self.incremental is False # no explicit state transfer
         
         # extract character mapping and calculate epoch size:
-        chars = set(self.mapping[0].keys())
-        data = list(data)
+        training_data, validation_data, split, training_epoch_size, validation_epoch_size, total_size, steps = self._split_data(data, val_data)
+        self.logger.info('training on %d files / %d batches per epoch / %d character tokens for %d character types',
+                         len(training_data), training_epoch_size, total_size, self.voc_size)
+        
+        # update mapping-specific layers:
+        self.reconfigure_for_mapping()
+        
+        # fit model
+        callbacks = [EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True),
+                     TerminateOnNaN(),
+                     StopSignalCallback(signal.SIGINT, self.logger)]
+        if self.stateful:
+            self.reset_cb = ResetStatesCallback(self.logger)
+            callbacks.append(self.reset_cb)
+        history = self.model.fit_generator(self._gen_data_from_files(training_data, steps, split=split, train=True, repeat=True),
+                                 steps_per_epoch=training_epoch_size, epochs=100,
+                                 workers=1, use_multiprocessing=False, # True makes communication with reset callback impossible
+                                 validation_data=self._gen_data_from_files(validation_data, steps, split=split, train=False, repeat=True),
+                                 validation_steps=validation_epoch_size,
+                                 verbose=1, callbacks=callbacks)
+        # set state
+        if np.isnan(history.history['loss'][0]):
+            self.logger.critical('training failed (NaN loss)')
+            self.status = 1
+        else:
+            if 'val_loss' in history.history:
+                self.logger.info('training finished with val_loss %f', min(history.history['val_loss']))
+            self.status = 2
+    
+    def _split_data(self, data, val_data):
+        '''Read text files and split into training vs validation, count batches and update char mapping.'''
+        assert self.status >= 1
+        
         shuffle(data) # random order of files (because generators cannot shuffle within files)
+        
         total_size = 0
+        chars = set(self.mapping[0].keys())
         if self.stateful: # we must split file-wise in stateful mode
             steps = self.length
             if val_data:
@@ -260,24 +291,26 @@ class Rater(object):
             else:
                 split = ceil(len(data)*self.validation_split) # split position in randomized file list
                 training_data, validation_data = data[:-split], data[-split:] # reserve last files for validation
-            assert len(training_data) > 0, "stateful mode needs at least one file for training"
-            assert len(validation_data) > 0, "stateful mode needs at least one file for validation"
+            assert training_data, "stateful mode needs at least one file for training"
+            assert validation_data, "stateful mode needs at least one file for validation"
             for file in validation_data:
                 self.logger.info('using input %s for validation only', file.name)
             training_epoch_size = 0
-            for file in training_data:
-                text = file.read()
-                size = len(text)
-                total_size += size
-                training_epoch_size += ceil((size-self.length)/steps/self.batch_size)
-                chars.update(set(text))
+            with click.progressbar(training_data) as pbar:
+                for file in pbar:
+                    text = file.read()
+                    size = len(text)
+                    total_size += size
+                    training_epoch_size += ceil((size-self.length)/steps/self.batch_size)
+                    chars.update(set(text))
             validation_epoch_size = 0
-            for file in validation_data:
-                text = file.read()
-                size = len(text)
-                total_size += size
-                validation_epoch_size += ceil((size-self.length)/steps/self.batch_size)
-                chars.update(set(text))
+            with click.progressbar(validation_data) as pbar:
+                for file in pbar:
+                    text = file.read()
+                    size = len(text)
+                    total_size += size
+                    validation_epoch_size += ceil((size-self.length)/steps/self.batch_size)
+                    chars.update(set(text))
             split = None
         else: # we can split window by window in stateless mode
             steps = 3
@@ -305,7 +338,7 @@ class Rater(object):
                 training_epoch_size = ceil(epoch_size*(1-self.validation_split))
                 validation_epoch_size = ceil(epoch_size*self.validation_split)
                 validation_data, training_data = data, data # same data, different generators (see below)
-                split = numpy.random.uniform(0, 1, (ceil(max_size/steps),)) # reserve split fraction at random positions
+                split = np.random.uniform(0, 1, (ceil(max_size/steps),)) # reserve split fraction at random positions
             if self.variable_length:
                 training_epoch_size *= 1.1 # training data augmented with partial windows (1+subsampling ratio)
         chars = sorted(list(chars))
@@ -313,10 +346,13 @@ class Rater(object):
         c_i = dict((c, i) for i, c in enumerate(chars, 1))
         i_c = dict((i, c) for i, c in enumerate(chars, 1))
         self.mapping = (c_i, i_c)
-        self.logger.info('training on %d files / %d batches per epoch / %d character tokens for %d character types',
-                         len(training_data), training_epoch_size, total_size, self.voc_size)
+
+        return training_data, validation_data, split, training_epoch_size, validation_epoch_size, total_size, steps
+
+    def reconfigure_for_mapping(self):
+        '''Reconfigure character embedding layer after change of mapping (possibly transferring previous weights).'''
         
-        # update mapping-specific layers:
+        assert self.status >= 1
         embedding = self.model.get_layer(name='char_embedding')
         if embedding.input_dim < self.voc_size: # more chars than during last training?
             if self.status >= 2: # weights exist already (i.e. incremental training)?
@@ -339,219 +375,6 @@ class Rater(object):
                         layer.set_weights(weights)
             else:
                 self.configure()
-        
-        # fit model
-        callbacks = [EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True),
-                     TerminateOnNaN(),
-                     StopSignalCallback(signal.SIGINT, self.logger)]
-        if self.stateful:
-            self.reset_cb = ResetStatesCallback(self.logger)
-            callbacks.append(self.reset_cb)
-        history = self.model.fit_generator(self.gen_data_from_files(training_data, steps, split=split, train=True, repeat=True),
-                                 steps_per_epoch=training_epoch_size, epochs=100,
-                                 workers=1, use_multiprocessing=False, # True makes communication with reset callback impossible
-                                 validation_data=self.gen_data_from_files(validation_data, steps, split=split, train=False, repeat=True),
-                                 validation_steps=validation_epoch_size,
-                                 verbose=1, callbacks=callbacks)
-        # set state
-        if numpy.isnan(history.history['loss'][0]):
-            self.logger.critical('training failed (NaN loss)')
-            self.status = 1
-        else:
-            if 'val_loss' in history.history:
-                self.logger.info('training finished with val_loss %f', min(history.history['val_loss']))
-            self.status = 2
-    
-    def save(self, filename):
-        '''Save weights of the trained model, and configuration parameters.
-        
-        Save both the configured parameters and the trained weights
-        of the model into `filename`.
-        (This preserves weights across CPU/GPU implementations or input shape configurations.)
-        '''
-        assert self.status > 1
-        self.model.save_weights(filename)
-        with h5py.File(filename, 'a') as f:
-            g = f.create_group('config')
-            g.create_dataset('width', data=numpy.array(self.width))
-            g.create_dataset('depth', data=numpy.array(self.depth))
-            g.create_dataset('length', data=numpy.array(self.length))
-            g.create_dataset('stateful', data=numpy.array(self.stateful))
-            g.create_dataset('variable_length', data=numpy.array(self.variable_length))
-            g.create_dataset('mapping', data=numpy.fromiter((ord(self.mapping[1][i]) if i in self.mapping[1] else 0 for i in range(self.voc_size)), dtype='uint32'))
-    
-    def load_config(self, filename):
-        '''Load parameters to prepare configuration/compilation.
-
-        Load model configuration from `filename`.
-        '''
-        assert self.status == 0
-        with h5py.File(filename, 'r') as f:
-            g = f['config']
-            self.width = g['width'][()]
-            self.depth = g['depth'][()]
-            self.length = g['length'][()]
-            self.stateful = g['stateful'][()]
-            self.variable_length = g['variable_length'][()]
-            c_i = dict((chr(c), i) for i, c in enumerate(g['mapping'][()]) if c > 0)
-            i_c = dict((i, chr(c)) for i, c in enumerate(g['mapping'][()]) if c > 0)
-            self.mapping = (c_i, i_c)
-            self.voc_size = len(c_i) + 1
-    
-    def load_weights(self, filename):
-        '''Load weights into the configured/compiled model.
-
-        Load weights from `filename` into the compiled and configured model.
-        (This preserves weights across CPU/GPU implementations or input shape configurations.)
-        '''
-        assert self.status > 0
-        self.model.load_weights(filename)
-        self.status = 2
-    
-    def rate(self, text, context=None):
-        '''Rate a string one by one.
-        
-        Calculate probabilities (individually) and perplexity (accumulated)
-        of the character sequence in `text` according to the current model
-        (predicting one by one). 
-        Use the integer list `context` as time-constant context variables, 
-        or zero-based underspecification.
-        
-        Return a list of character-probability tuples, and the overall perplexity.
-        '''
-        
-        # prediction calculation is a lot slower that way than via batched generator, cf. rate_once() / test()
-        # perplexity calculation is a lot slower that way than via tensor metric, cf. test()
-        assert self.status > 1
-        assert self.incremental is False # no explicit state transfer
-        if not context:
-            context = self.underspecify_contexts()
-        x = numpy.zeros((1, 1 if self.stateful else self.length), dtype=numpy.uint32)
-        zs = [numpy.zeros((1, 1 if self.stateful else self.length), dtype=numpy.uint32) for _ in context]
-        entropy = 0
-        result = []
-        if self.stateful:
-            self.model.reset_states()
-        for i, char in enumerate(text):
-            if char not in self.mapping[0]:
-                self.logger.error('unmapped character "%s" at input position %d', char, i)
-                idx = 0
-            else:
-                idx = self.mapping[0][char]
-            if i == 0:
-                result.append((char, 1.0)) # or merely uniform baseline?
-            else:
-                input_ = [x[:, -i:]] + [z[:, -i:] for z in zs] if self.variable_length else [x] + zs
-                output = self.model.predict_on_batch(input_).tolist()
-                pred = dict(enumerate(output[0][0] if self.stateful else output[0]))
-                prob = pred[idx]
-                entropy -= log(max(prob,1e-99), 2)
-                result.append((char, prob))
-            x = numpy.roll(x, -1, axis=1) # left-shift by 1 time-step
-            zs = [numpy.roll(z, -1, axis=1) for z in zs]
-            x[0, -1] = idx # fill with next char
-            for z, idx in zip(zs, context):
-                z[0, -1] = idx
-        return result, pow(2.0, entropy/len(text))
-
-    def predict(self, candidates, initial_states, context=None):
-        '''Predict character probabilities, passing initial and final states.
-        
-        Calculate the output probability distribution for a single input character
-        incrementally according to the current model. Do so in parallel for
-        any number of hypotheses (i.e. batch size), identified by list position:
-        For `candidates` hypotheses with their `initial_states`, return a tuple of
-        their probabilities and their final states (for the next run).
-        If any of `initial_states` is None, it is treated like reset (zero states).
-        
-        Use the integer list `context` as time-constant context variables, 
-        or zero-based underspecification.
-        
-        Return a list of probability arrays and a list of final states.
-        
-        (To be called by an adapter tracking history paths and input alternatives,
-         combining them up to a maximum number of best running candidates, i.e. beam.
-         See `scripts.run.generate` and `wrapper.rate` and `lib.Node`.)
-        (Requires the model to be compiled in an incremental configuration.
-         Ignores the configured batch size and window length.)
-        '''
-        
-        assert self.status > 1
-        assert self.stateful is False # no implicit state transfer
-        assert self.incremental is True # only explicit state transfer
-        assert len(candidates) == len(initial_states), "number of inputs (%d) and number of states (%d) inconsistent" % (len(candidates), len(initial_states))
-        if not context:
-            context = self.underspecify_contexts()
-        n = len(candidates)
-        x = numpy.zeros((n, 1), dtype=numpy.uint32)
-        zs = [numpy.zeros((n, 1), dtype=numpy.uint32) for _ in context]
-        for i in range(n):
-            char = candidates[i]
-            if char not in self.mapping[0]:
-                # suppress the input error because it must be an aftereffect
-                # of an error already reported by the caller (wrapper.rate)
-                # – generative use case does not produce unmapped output (scripts.run.generate):
-                #self.logger.error('unmapped character "%s" at input alternative %d', char, i)
-                idx = 0
-            else:
-                idx = self.mapping[0][char]
-            x[i, 0] = idx
-            for z, idx in zip(zs, context):
-                z[i, 0] = idx
-        # each initial_states[i] is a layer list (h1,c1,h2,c2,...) of state vectors
-        # thus, each layer is a single input (and output) in addition to normal input (and output)
-        # for batch processing, all hypotheses must be passed together:
-        for i, initial_state in enumerate(initial_states):
-            if not initial_state:
-                initial_states[i] = [numpy.zeros((self.width), dtype=numpy.float) for n in range(0, self.depth*2)] # h+c per layer
-        states_inputs = [numpy.vstack([initial_state[layer] for initial_state in initial_states]) for layer in range(0, self.depth*2)] # stack layers across batch (h+c per layer)
-        
-        outputs = self.model.predict_on_batch([x] + zs + states_inputs)
-        probs_outputs = outputs[0]
-        states_outputs = list(outputs[1:]) # we need a (layers) list instead of a tuple
-        preds = [] # we need a (hypo) list of (score) vectors instead of an array
-        final_states = [] # we need a (hypo) list of (layers) list of state vectors
-        for i in range(n):
-            preds.append(probs_outputs[i, :])
-            final_states.append([layer[i:i+1] for layer in states_outputs])
-        return preds, final_states
-    
-    def rate_once(self, text, context=None, verbose=1):
-        '''Rate a string all at once.
-        
-        Calculate the probabilities of the character sequence in `text`
-        according to the current model (predicting all at once).
-        Use the integer list `context` as time-constant context variables, 
-        or zero-based underspecification.
-        
-        Return a list of probabilities (one per character/codepoint).
-        
-        (To be called on (subsequent chunks of) text directly, as a faster
-         replacement for `rate`. See also `wrapper.rate`.)
-        (Requires the model to be compiled in a non-incremental configuration.)
-        '''
-        
-        assert self.status > 1
-        assert self.incremental is False # no explicit state transfer
-        if not context:
-            context = self.underspecify_contexts()
-        size = len(text)
-        steps = self.length if self.stateful else 1
-        epoch_size = ceil((size-1)/self.batch_size/steps)
-        preds = self.model.predict_generator(self.gen_data(text, context, steps), steps=epoch_size, verbose=verbose)
-        preds = preds.reshape((-1, self.voc_size))[0:size, :]
-        
-        # get predictions for true symbols (characters)
-        probs = [1.0] # or merely uniform baseline?
-        for pred, next_char in zip(preds, list(text[1:])):
-            if next_char not in self.mapping[0]:
-                idx = 0
-            else:
-                idx = self.mapping[0][next_char]
-            probs.append(pred[idx])
-            if len(probs) >= size:
-                break # stop short of last batch residue
-        return probs
     
     def test(self, test_data):
         '''Evaluate model on text files.
@@ -582,14 +405,368 @@ class Rater(object):
                 epoch_size += ceil((size-1)/self.batch_size/steps)
         
         # todo: make iterator thread-safe and then use_multiprocesing=True
-        loss, _accuracy = self.model.evaluate_generator(self.gen_data_from_files(test_data, steps), steps=epoch_size, verbose=1)
+        loss, _accuracy = self.model.evaluate_generator(self._gen_data_from_files(test_data, steps), steps=epoch_size, verbose=1)
         return exp(loss)
     
+    def rate(self, text, context=None, verbose=1):
+        '''Rate a string all at once.
+        
+        Calculate the probabilities of the character sequence in `text`
+        according to the current model (predicting all at once).
+        Use the integer list `context` as time-constant context variables,
+        or zero-based underspecification.
+        
+        Return a list of probabilities (one per character/codepoint).
+        
+        (To be called on (subsequent chunks of) text directly, as a faster
+         replacement for `rate`. See also `wrapper.rate`.)
+        (Requires the model to be compiled in a non-incremental configuration.)
+        '''
+        
+        assert self.status > 1
+        assert self.incremental is False # no explicit state transfer
+        if not context:
+            context = self.underspecify_contexts()
+        size = len(text)
+        steps = self.length if self.stateful else 1
+        epoch_size = ceil((size-1)/self.batch_size/steps)
+        preds = self.model.predict_generator(self._gen_data(text, context, steps), steps=epoch_size, verbose=verbose)
+        preds = preds.reshape((-1, self.voc_size))[0:size, :]
+        
+        # get predictions for true symbols (characters)
+        probs = [1.0] # or merely uniform baseline?
+        for pred, next_char in zip(preds, list(text[1:])):
+            if next_char not in self.mapping[0]:
+                idx = 0
+            else:
+                idx = self.mapping[0][next_char]
+            probs.append(pred[idx])
+            if len(probs) >= size:
+                break # stop short of last batch residue
+        return probs
+    
+    def rate2(self, text, context=None):
+        '''Rate a string one by one.
+        
+        Calculate probabilities (individually) and perplexity (accumulated)
+        of the character sequence in `text` according to the current model
+        (predicting one by one).
+        Use the integer list `context` as time-constant context variables,
+        or zero-based underspecification.
+        
+        Return a list of character-probability tuples, and the overall perplexity.
+        '''
+        
+        # prediction calculation is a lot slower that way than via batched generator, cf. rate_once() / test()
+        # perplexity calculation is a lot slower that way than via tensor metric, cf. test()
+        assert self.status > 1
+        assert self.incremental is False # no explicit state transfer
+        if not context:
+            context = self.underspecify_contexts()
+        x = np.zeros((1, 1 if self.stateful else self.length), dtype=np.uint32)
+        zs = [np.zeros((1, 1 if self.stateful else self.length), dtype=np.uint32) for _ in context]
+        entropy = 0
+        result = []
+        if self.stateful:
+            self.model.reset_states()
+        for i, char in enumerate(text):
+            if char not in self.mapping[0]:
+                self.logger.error('unmapped character "%s" at input position %d', char, i)
+                idx = 0
+            else:
+                idx = self.mapping[0][char]
+            if i == 0:
+                result.append((char, 1.0)) # or merely uniform baseline?
+            else:
+                input_ = [x[:, -i:]] + [z[:, -i:] for z in zs] if self.variable_length else [x] + zs
+                output = self.model.predict_on_batch(input_).tolist()
+                pred = dict(enumerate(output[0][0] if self.stateful else output[0]))
+                prob = pred[idx]
+                entropy -= log(max(prob, 1e-99), 2)
+                result.append((char, prob))
+            x = np.roll(x, -1, axis=1) # left-shift by 1 time-step
+            zs = [np.roll(z, -1, axis=1) for z in zs]
+            x[0, -1] = idx # fill with next char
+            for z, idx in zip(zs, context):
+                z[0, -1] = idx
+        return result, pow(2.0, entropy/len(text))
+    
+    def predict(self, candidates, initial_states, context=None):
+        '''Predict character probabilities, passing initial and final states.
+        
+        Calculate the output probability distribution for a single input character
+        incrementally according to the current model. Do so in parallel for
+        any number of hypotheses (i.e. batch size), identified by list position:
+        For `candidates` hypotheses with their `initial_states`, return a tuple of
+        their probabilities and their final states (for the next run).
+        If any of `initial_states` is None, it is treated like reset (zero states).
+        
+        Use the integer list `context` as time-constant context variables,
+        or zero-based underspecification.
+        
+        Return a list of probability arrays and a list of final states.
+        
+        (To be called by an adapter tracking history paths and input alternatives,
+         combining them up to a maximum number of best running candidates, i.e. beam.
+         See `scripts.run.generate` and `wrapper.rate` and `lib.Node`.)
+        (Requires the model to be compiled in an incremental configuration.
+         Ignores the configured batch size and window length.)
+        '''
+        
+        assert self.status > 1
+        assert self.stateful is False # no implicit state transfer
+        assert self.incremental is True # only explicit state transfer
+        assert len(candidates) == len(initial_states), "number of inputs (%d) and number of states (%d) inconsistent" % (len(candidates), len(initial_states))
+        if not context:
+            context = self.underspecify_contexts()
+        n = len(candidates)
+        x = np.zeros((n, 1), dtype=np.uint32)
+        zs = [np.zeros((n, 1), dtype=np.uint32) for _ in context]
+        for i in range(n):
+            char = candidates[i]
+            if char not in self.mapping[0]:
+                # suppress the input error because it must be an aftereffect
+                # of an error already reported by the caller (wrapper.rate)
+                # – generative use case does not produce unmapped output (scripts.run.generate):
+                #self.logger.error('unmapped character "%s" at input alternative %d', char, i)
+                idx = 0
+            else:
+                idx = self.mapping[0][char]
+            x[i, 0] = idx
+            for z, idx in zip(zs, context):
+                z[i, 0] = idx
+        # each initial_states[i] is a layer list (h1,c1,h2,c2,...) of state vectors
+        # thus, each layer is a single input (and output) in addition to normal input (and output)
+        # for batch processing, all hypotheses must be passed together:
+        for i, initial_state in enumerate(initial_states):
+            if not initial_state:
+                initial_states[i] = [np.zeros((self.width), dtype=np.float) for n in range(0, self.depth*2)] # h+c per layer
+        states_inputs = [np.vstack([initial_state[layer] for initial_state in initial_states]) for layer in range(0, self.depth*2)] # stack layers across batch (h+c per layer)
+        
+        outputs = self.model.predict_on_batch([x] + zs + states_inputs)
+        probs_outputs = outputs[0]
+        states_outputs = list(outputs[1:]) # we need a (layers) list instead of a tuple
+        preds = [] # we need a (hypo) list of (score) vectors instead of an array
+        final_states = [] # we need a (hypo) list of (layers) list of state vectors
+        for i in range(n):
+            preds.append(probs_outputs[i, :])
+            final_states.append([layer[i:i+1] for layer in states_outputs])
+        return preds, final_states
+
+    # todo: also allow specifying suffix
+    def generate(self, prefix, number, context=None):
+        '''Generate a number of characters after a prefix.
+        
+        Calculate the hidden layer state after reading the string `prefix`
+        according to the current model. Use it as the initial state in the
+        following beam search, constructing a first (zero-length) hypothesis:
+        
+        1. For each current hypothesis, calculate new predictions. Taking only
+           the best-scoring candidates for the next character (beam threshold /
+           beam width / fan-in), construct new hypotheses (replacing the current)
+           by appending the next character candidates and the new HL state,
+           respectively.
+        2. Score all current hypotheses by adding the log probabilities of their
+           individual characters, normalised by their length (norm heuristic).
+        3. Separate hypotheses already of length `number` into the list of
+           solutions. If enough are available (beam depth / fan-out), then
+           terminate and return the best-scoring solution.
+        4. Sort remaining hypotheses according to score and select the best ones
+           (parallel batch size) to repeat with step 1.
+        
+        Use the integer list `context` as time-constant context variables,
+        or zero-based underspecification.
+        
+        Return the character string of the best scoring hypothesis.
+        
+        (Requires the model to be compiled in an incremental configuration.
+         Ignores the configured batch size and window length.)
+        '''
+        
+        assert self.status > 1
+        assert self.stateful is False # no implicit state transfer
+        assert self.incremental is True # only explicit state transfer
+        if not context:
+            context = self.underspecify_contexts()
+        
+        # initial state
+        prefix_states = [None]
+        # prefix (to get correct initial state)
+        for char in prefix[:-1]: # all but last character
+            _, prefix_states = self.predict([char], prefix_states, context=context)
+        next_fringe = [Node(state=prefix_states[0],
+                            value=prefix[-1], # last character
+                            cost=0.0)]
+        
+        # beam search
+        for _ in range(number): # iterate over number of characters to be generated
+            fringe = next_fringe
+            preds, states = self.predict([n.value for n in fringe],
+                                         [n.state for n in fringe],
+                                         context=context)
+            next_fringe = []
+            for j, n in enumerate(fringe): # iterate over batch
+                pred = preds[j]
+                pred_best = np.argsort(pred)[-10:] # keep only 10-best alternatives
+                pred_best = pred_best[np.searchsorted(pred[pred_best], 0.004):] # keep only alternatives better than 1/256 (uniform distribution)
+                costs = -np.log(pred[pred_best])
+                state = states[j]
+                for best, cost in zip(pred_best, costs): # follow up on best predictions
+                    if best not in self.mapping[1]: # avoid zero/unmapped
+                        continue # ignore this alternative
+                    n_new = Node(parent=n, state=state, value=self.mapping[1][best], cost=cost)
+                    insort_left(next_fringe, n_new) # add alternative to tree
+            next_fringe = next_fringe[:256] # keep 256-best paths (equals batch size)
+        best = next_fringe[0] # best-scoring
+        result = ''.join([n.value for n in best.to_sequence()])
+        
+        return result # without prefix
+
+    # todo: generalise from linear/hierarchical sequence of alternatives to actual lattice
+    #       (currently we expect a list of
+    #            pairs of PAGE element, i.e. TextRegion/TextLine/Word/Glyph reference,
+    #                 and PAGE text readings, i.e. list of TextEquiv references,
+    #        and are expected to return a list of
+    #            tuples of PAGE element
+    #                  and best TextEquiv reference
+    #                  and its probability, i.e. average of its characters)
+    #       max_length: guaranteed boundary on string length of readings
+    #       beam_width: number of hypotheses (histories) to keep between elements
+    #       beam_clustering_dist: maximum distance between HL state vectors to form a cluster for pruning
+    def rate_best(self, text, context=None, max_length=500, beam_width=100, beam_clustering_dist=0):
+        '''Rate a lattice of string alternatives, decoding the best-scoring path.
+        '''
+        # initial state; todo: pass from previous page
+        next_fringe = [Node(state=None, value='\n', cost=0.0)]
+        for element, textequivs in text:
+            self.logger.debug("Rating '%s', combining %d new inputs with %d existing paths",
+                              element.id if element else "space", len(textequivs), len(next_fringe))
+            fringe, next_fringe = next_fringe, []
+            for node in fringe:
+                # make a copy of parent node for each textequiv alternative (keeping value+state until prediction)
+                new_nodes = [Node(parent=node, state=node.state, value=node.value, cost=0.0, extras=(element, textequiv)) for textequiv in textequivs]
+                strings_ = [textequiv.Unicode for textequiv in textequivs] # alternative character sequences
+                # advance states and accumulate costs of all alternatives (of different length) in parallel
+                for position in range(max_length):
+                    # predict strings_ at current position
+                    updates = [j for j in range(len(textequivs)) if position < len(strings_[j])] # indices to update (next batch)
+                    if updates == []:
+                        break # no characters left for any textequiv alternative
+                    preds, states = self.predict([new_nodes[j].value for j in updates],
+                                                 [new_nodes[j].state for j in updates],
+                                                 context)
+                    for alternative, (new_node, string_) in enumerate([(new_nodes[j], strings_[j]) for j in updates]):
+                        char = string_[position]
+                        if char not in self.mapping[0]:
+                            if not next_fringe: # avoid repeating the input error for all current candidates
+                                self.logger.error('unmapped character "%s" at input alternative %d of element %s', char, textequivs[updates[alternative]].index, element.id)
+                            idx = 0
+                        else:
+                            idx = self.mapping[0][char]
+                        new_node.value = char
+                        new_node.state = states[alternative]
+                        new_node.cum_cost += -log(max(preds[alternative][idx], 1e-99), 2)
+                for new_node in new_nodes:
+                    if beam_clustering_dist and self._history_clustering(new_node, next_fringe, beam_clustering_dist):
+                        continue
+                    insort_left(next_fringe, new_node) # insert sorted by cumulative costs
+                    # todo: incorporate input confidences, too (weighted product or as input into LM)
+            #self.logger.debug("Shrinking %d paths to best %d", len(next_fringe), beam_width)
+            next_fringe = next_fringe[:beam_width] # keep best paths
+        best = next_fringe[0] # best-scoring path
+        result = []
+        for node in best.to_sequence()[1:]: # ignore root node
+            element, textequiv = node.extras
+            textequiv_len = len(textequiv.Unicode)
+            score = pow(2.0, -(node.cum_cost-node.parent.cum_cost)/textequiv_len) # average probability
+            result.append((element, textequiv, score))
+        return result, best.cum_cost
+    
+    #def rate_all(self, lattice):
+    #    '''Rate a lattice of string alternatives, rescoring all edges.'''
+    
+    # todo: history clustering for pruning paths by joining similar nodes (instead of neglecting costly nodes)
+    def _history_clustering(self, new_node, next_fringe, distance=5):
+        '''Determine whether a node may enter the beam, or has redundant history.
+        
+        Search hypotheses in `next_fringe` for similarities to `new_node`,
+        comparing their hidden layer state (history) vectors, considering them
+        similar if the vector norm is below `distance`.
+        
+        If such hypothesis exists, compare scores: If it is worse than `new_node`,
+        then remove it from `next_fringe` right away. Otherwise, return True
+        (preventing `new_node` from being inserted).
+        
+        If no such hypothesis exists, then return False (allowing `new_node` to be
+        inserted).
+        '''
+        for old_node in next_fringe:
+            if (new_node.value == old_node.value and
+                all(np.linalg.norm(new_node.state[layer]-old_node.state[layer]) < distance for layer in range(self.depth))):
+                if old_node.cum_cost < new_node.cum_cost:
+                    # self.logger.debug("discarding %s in favour of %s due to history clustering",
+                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in new_node.to_sequence()[1:]]),
+                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in old_node.to_sequence()[1:]]))
+                    return True # continue with next new_node
+                else:
+                    # self.logger.debug("neglecting %s in favour of %s due to history clustering",
+                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in old_node.to_sequence()[1:]]),
+                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in new_node.to_sequence()[1:]]))
+                    next_fringe.remove(old_node)
+                    break # immediately proceed to insert new_node
+        return False # proceed to insert new_node (no clustering possible)
+    
+    def save(self, filename):
+        '''Save weights of the trained model, and configuration parameters.
+        
+        Save both the configured parameters and the trained weights
+        of the model into `filename`.
+        (This preserves weights across CPU/GPU implementations or input shape configurations.)
+        '''
+        assert self.status > 1
+        self.model.save_weights(filename)
+        with h5py.File(filename, 'a') as file:
+            group = file.create_group('config')
+            group.create_dataset('width', data=np.array(self.width))
+            group.create_dataset('depth', data=np.array(self.depth))
+            group.create_dataset('length', data=np.array(self.length))
+            group.create_dataset('stateful', data=np.array(self.stateful))
+            group.create_dataset('variable_length', data=np.array(self.variable_length))
+            group.create_dataset('mapping', data=np.fromiter((ord(self.mapping[1][i]) if i in self.mapping[1] else 0 for i in range(self.voc_size)), dtype='uint32'))
+    
+    def load_config(self, filename):
+        '''Load parameters to prepare configuration/compilation.
+
+        Load model configuration from `filename`.
+        '''
+        assert self.status == 0
+        with h5py.File(filename, 'r') as file:
+            group = file['config']
+            self.width = group['width'][()]
+            self.depth = group['depth'][()]
+            self.length = group['length'][()]
+            self.stateful = group['stateful'][()]
+            self.variable_length = group['variable_length'][()]
+            c_i = dict((chr(c), i) for i, c in enumerate(group['mapping'][()]) if c > 0)
+            i_c = dict((i, chr(c)) for i, c in enumerate(group['mapping'][()]) if c > 0)
+            self.mapping = (c_i, i_c)
+            self.voc_size = len(c_i) + 1
+    
+    def load_weights(self, filename):
+        '''Load weights into the configured/compiled model.
+
+        Load weights from `filename` into the compiled and configured model.
+        (This preserves weights across CPU/GPU implementations or input shape configurations.)
+        '''
+        assert self.status > 0
+        self.model.load_weights(filename)
+        self.status = 2
+    
     # data preparation
-    def gen_data_from_files(self, files, steps, split=None, train=False, repeat=False):
+    def _gen_data_from_files(self, files, steps, split=None, train=False, repeat=False):
         '''Generate numpy arrays suitable for batch processing.
         
-        Split the character sequences read from `files` into windows (as configured), 
+        Split the character sequences read from `files` into windows (as configured),
         progressing by `steps` at a time. Yield successive batches of
         input and expected output arrays, accordingly.
         Derive meta-data for context variables from file names.
@@ -605,18 +782,18 @@ class Rater(object):
                 name = os.path.basename(file.name).split('.')[0]
                 author = name.split('_')[0]
                 year = ceil(int(name.split('_')[-1])/10)
-                yield from self.gen_data(file.read(), [year], steps, train, split)
+                yield from self._gen_data(file.read(), [year], steps, train, split)
             if not repeat:
                 break # causes StopIteration exception if calculated epoch size is too large
 
     # todo: make iterator thread-safe and then use_multiprocesing=True
-    def gen_data(self, text, context, steps, train=False, split=None):
+    def _gen_data(self, text, context, steps, train=False, split=None):
         '''Generate numpy arrays suitable for batch processing.
         
-        Split the character sequence `text` into windows (as configured), 
+        Split the character sequence `text` into windows (as configured),
         progressing by `steps` at a time. Yield successive batches of
         input and expected output arrays, accordingly.
-        Use the integer list `context` as time-constant context variables, 
+        Use the integer list `context` as time-constant context variables,
         or zero-based underspecification.
         
         If `split` is given, then omit windows randomly at a rate equal to
@@ -634,14 +811,14 @@ class Rater(object):
         sequences = []
         next_chars = []
         for i in range(self.length if self.stateful else 0, size, steps):
-            if isinstance(split, numpy.ndarray):
+            if isinstance(split, np.ndarray):
                 if (split[int(i/steps)] < self.validation_split) == train:
                     # data shared between training and validation: belongs to other generator, resp.
-                    continue 
+                    continue
                 # re-use rest of random number:
-                r = (split[int(i/steps)] - self.validation_split) / (1 - self.validation_split)
+                rand = (split[int(i/steps)] - self.validation_split) / (1 - self.validation_split)
             else:
-                r = 0
+                rand = np.random.uniform(0, 1, 1)[0]
             # make windows:
             if i < self.length:
                 if train:
@@ -652,7 +829,7 @@ class Rater(object):
                         continue
                 else:
                     # partial window (needs interim batch size 1 for interim length i):
-                    yield self.vectorize([text[0:i]], [text[i]], context, length=i, batch_size=1)
+                    yield self._vectorize([text[0:i]], [text[i]], context, length=i, batch_size=1)
                     continue
             else:
                 sequences.append(text[i - self.length: i])
@@ -662,46 +839,46 @@ class Rater(object):
                 next_chars.append(text[i])
             if (len(sequences) % self.batch_size == 0 or # next full batch or
                 i + steps >= size): # last (partially filled) batch?
-                x, y = self.vectorize(sequences, next_chars, context)
+                x, y = self._vectorize(sequences, next_chars, context)
                 # also train for unmapped characters by random degradation,
                 #         or for partial windows by random subsampling:
-                if train and isinstance(split, numpy.ndarray):
+                if train:
                     # zero degradation for character underspecification:
-                    r_max = 0.01 # effective character degradation ratio
-                    if r < r_max:
-                        j = int((self.length-1) * r / r_max) # random position in window
+                    rand_max = 0.01 # effective character degradation ratio
+                    if rand < rand_max:
+                        j = int((self.length-1) * rand / rand_max) # random position in window
                         x[0][:, j] = 0
                     # zero degradation for context underspecification:
-                    r = (r - r_max) / (1 - r_max) # re-use rest of random number
-                    r_max = 0.1 # effective context degradation ratio
-                    if r < r_max:
-                        j = int(len(x) * r / r_max) + 1 # random context
+                    rand = (rand - rand_max) / (1 - rand_max) # re-use rest of random number
+                    rand_max = 0.1 # effective context degradation ratio
+                    if rand < rand_max:
+                        j = int((len(x) - 1) * rand / rand_max) + 1 # random context
                         x[j][:, :] = 0
-                    r = (r - r_max) / (1 - r_max) # re-use rest of random number
+                    rand = (rand - rand_max) / (1 - rand_max) # re-use rest of random number
                     if self.variable_length:
-                        r_max = 0.1 # effective subsampling ratio
-                        if r < r_max:
-                            j = int((self.length-1) * r / r_max) + 1 # random length
+                        rand_max = 0.1 # effective subsampling ratio
+                        if rand < rand_max:
+                            j = int((self.length-1) * rand / rand_max) + 1 # random length
                             # erase complete batch by sublength from the left to simulate running in with zero padding as in rate():
                             # x[0][:, 0:j] = 0
                             # yield (x, y)
                             # shorten complete batch to sublength from the right to simulate running in with short sequences in rate():
                             yield [z[:, -j:] for z in x], y
-                        r = (r - r_max) / (1 - r_max) # re-use rest of random number
+                        rand = (rand - rand_max) / (1 - rand_max) # re-use rest of random number
                 yield x, y
                 sequences = []
                 next_chars = []
             if i + steps >= size and steps > 1: # last batch: 1 sample with partial length
                 next_chars.append(text[i+1: size])
                 sequences.append(text[i: size-1])
-                yield self.vectorize(sequences, next_chars, context, batch_size=1) # length=size-i-1 crashes predict_generator in stateful mode (return_sequences)
+                yield self._vectorize(sequences, next_chars, context, batch_size=1) # length=size-i-1 crashes predict_generator in stateful mode (return_sequences)
     
-    def vectorize(self, inputs, outputs=None, contexts=None, length=None, batch_size=None):
+    def _vectorize(self, inputs, outputs=None, contexts=None, length=None, batch_size=None):
         '''Convert a sequence of characters into numpy arrays.
         
-        Convert the character sequences in `inputs` to index vectors 
+        Convert the character sequences in `inputs` to index vectors
         of equal (window) length by zero padding.
-        Use the integer list `contexts` as time-constant context variables, 
+        Use the integer list `contexts` as time-constant context variables,
         or zero-based underspecification. Concatenate both inputs.
         If given, convert the character sequences in `outputs` to unit vectors
         likewise.
@@ -715,38 +892,38 @@ class Rater(object):
         if not batch_size:
             batch_size = self.batch_size
         # vectorization
-        x = numpy.zeros((batch_size, length), dtype=numpy.uint32)
+        x = np.zeros((batch_size, length), dtype=np.uint32)
         if self.stateful:
-            y = numpy.zeros((batch_size, length, self.voc_size), dtype=numpy.bool)
+            y = np.zeros((batch_size, length, self.voc_size), dtype=np.bool)
         else:
-            y = numpy.zeros((batch_size, self.voc_size), dtype=numpy.bool)
-        zs = [numpy.zeros((batch_size, length), dtype=numpy.uint32) for _ in contexts]
-        for k, sequence in enumerate(inputs):
-            assert k < batch_size, 'input sequence %d (%s) exceeds batch size' % (k, sequence)
-            for t, char in enumerate(sequence):
-                assert t < length, 'input sequence %d (%s) exceeds window length' % (t, sequence)
+            y = np.zeros((batch_size, self.voc_size), dtype=np.bool)
+        zs = [np.zeros((batch_size, length), dtype=np.uint32) for _ in contexts]
+        for i, sequence in enumerate(inputs):
+            assert i < batch_size, 'input sequence %d (%s) exceeds batch size' % (i, sequence)
+            for j, char in enumerate(sequence):
+                assert j < length, 'input sequence %d (%s) exceeds window length' % (j, sequence)
                 if char not in self.mapping[0]:
-                    self.logger.error('unmapped character "%s" at input position %d', char, t + k * length)
+                    self.logger.error('unmapped character "%s" at input position %d', char, j + i * length)
                     idx = 0
                 else:
                     idx = self.mapping[0][char]
-                x[k, t] = idx
+                x[i, j] = idx
                 for z, idx in zip(zs, contexts):
-                    z[k, t] = idx
+                    z[i, j] = idx
                 if outputs:
                     if self.stateful:
-                        char = outputs[k][t]
+                        char = outputs[i][j]
                     else:
-                        char = outputs[k]
+                        char = outputs[i]
                     if char not in self.mapping[0]:
-                        self.logger.error('unmapped character "%s" at output position %d', char, t + k * length)
+                        self.logger.error('unmapped character "%s" at output position %d', char, j + i * length)
                         idx = 0
                     else:
                         idx = self.mapping[0][char]
                     if self.stateful:
-                        y[k, t, idx] = 1
+                        y[i, j, idx] = 1
                     else:
-                        y[k, idx] = 1
+                        y[i, idx] = 1
         return [x] + zs, y
     
     def print_charset(self):
@@ -758,56 +935,55 @@ class Rater(object):
         '''Paint a heat map of character embeddings.
         
         Calculate the autocorrelation matrix of embedding vectors,
-        and plot it as PNG with grayscale colors into `filename`. 
+        and plot it as PNG with grayscale colors into `filename`.
         
         (Similar characters should have a higher correlation and
         therefore form groups. Rare or unseen characters will be
         darker and appear random.)
         '''
         logging.getLogger('matplotlib').setLevel(logging.WARNING) # workaround
-        import matplotlib.pyplot as plt
-        import matplotlib.cm as cm
+        from matplotlib import pyplot as plt
+        from matplotlib import cm
         
         assert self.status == 2
         charlay = self.model.get_layer(name='char_embedding')
         charwgt = charlay.get_weights()[0]
-        charcor = numpy.tensordot(charwgt, charwgt, (1, 1)) # confusion matrix
-        plt.imsave(filename, numpy.log(numpy.abs(charcor)), cmap=cm.gray)
+        charcor = np.tensordot(charwgt, charwgt, (1, 1)) # confusion matrix
+        plt.imsave(filename, np.log(np.abs(charcor)), cmap=cm.gray)
     
     def plot_context_embeddings_similarity(self, filename, n=1):
         '''Paint a heat map of context embeddings.
         
         Calculate the autocorrelation matrix of embedding vectors,
-        and plot it as PNG with grayscale colors into `filename`. 
+        and plot it as PNG with grayscale colors into `filename`.
         
         (Similar contexts should have a higher correlation and
         therefore form groups. Rare or unseen contexts will be
         darker and appear random.)
         '''
         logging.getLogger('matplotlib').setLevel(logging.WARNING) # workaround
-        import matplotlib.pyplot as plt
-        import matplotlib.cm as cm
+        from matplotlib import pyplot as plt
+        from matplotlib import cm
         
         assert self.status == 2
         ctxtlay = self.model.get_layer(name='context%d_embedding' % n)
         ctxtwgt = ctxtlay.get_weights()[0]
-        ctxtcor = numpy.tensordot(ctxtwgt, ctxtwgt, (1, 1)) # confusion matrix
-        plt.imsave(filename, numpy.log(numpy.abs(ctxtcor)), cmap=cm.gray)
+        ctxtcor = np.tensordot(ctxtwgt, ctxtwgt, (1, 1)) # confusion matrix
+        plt.imsave(filename, np.log(np.abs(ctxtcor)), cmap=cm.gray)
 
     def plot_context_embeddings_projection(self, filename, n=1):
         '''Paint a 2-d PCA projection of context embeddings.
         
-        Calculate the principal component analysis for only 
+        Calculate the principal component analysis for only
         2 components of embedding vectors, and scatter plot
         its vectors with blue crosses (and a red circle for the
-        zero/underspecified vector) as PNG into `filename`. 
+        zero/underspecified vector) as PNG into `filename`.
         
         (Similar contexts should lie close to each other and
         therefore form groups. The zero vector should be central.)
         '''
         logging.getLogger('matplotlib').setLevel(logging.WARNING) # workaround
-        import matplotlib.pyplot as plt
-        import matplotlib.cm as cm
+        from matplotlib import pyplot as plt
         from sklearn.decomposition import PCA
         
         assert self.status == 2
@@ -832,18 +1008,19 @@ class StopSignalCallback(Callback):
         self.sig = sig
         self.logger = logger or logging.getLogger(__name__)
         def stopper(sig, frame):
-            if self.received: # called again?
-                self.logger.critical('interrupting')
-                exit(0)
-            else:
-                self.logger.critical('stopping training')
-                self.received = True
+            if sig == self.sig:
+                if self.received: # called again?
+                    self.logger.critical('interrupting')
+                    exit(0)
+                else:
+                    self.logger.critical('stopping training')
+                    self.received = True
         self.action = signal.signal(self.sig, stopper)
     
     def __del__(self):
         signal.signal(self.sig, self.action)
     
-    def on_batch_end(self, batch, logs):
+    def on_batch_end(self, batch, logs=None):
         if self.received:
             self.model.stop_training = True
 
@@ -876,7 +1053,7 @@ class ResetStatesCallback(Callback):
     def on_batch_end(self, batch, logs=None):
         if logs.get('loss') > 25:
             self.logger.warning('huge loss in "%s" at %d', self.here, batch)
-        if numpy.isnan(logs.get('loss')):
+        if np.isnan(logs.get('loss')):
             self.logger.critical('NaN loss in "%s" at %d', self.here, batch)
         if (self.params['do_validation'] and batch >= self.params['steps']-1):
             # in fit_generator just before evaluate_generator
