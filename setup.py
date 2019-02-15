@@ -12,8 +12,8 @@ with codecs.open('README.md', encoding='utf-8') as f:
 
 setup(
     name='ocrd_keraslm',
-    version='0.2.0',
-    description='keras language model',
+    version='0.3.0',
+    description='character-level language modelling in Keras',
     long_description=README,
     author='Konstantin Baierer, Kay-Michael Würzner',
     author_email='unixprog@gmail.com, wuerzner@gmail.com',
@@ -28,6 +28,12 @@ setup(
         'tensorflow',
         'h5py',
     ],
+    extras_require={
+        'plotting': [
+            'sklearn',
+            'matplotlib',
+            ]
+    },
     package_data={
         '': ['*.json', '*.yml', '*.yaml'],
     },

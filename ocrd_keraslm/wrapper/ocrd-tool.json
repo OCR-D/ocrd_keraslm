@@ -1,6 +1,6 @@
 {
   "git_url": "https://github.com/OCR-D/ocrd_keraslm",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "tools": {
     "ocrd-keraslm-rate": {
       "executable": "ocrd-keraslm-rate",
@@ -25,7 +25,7 @@
         },
         "add_space_glyphs": {
           "type": "boolean",
-          "description": "whether to insert whitespace and newline as pseudo-glyphs in result (at glyph level)",
+          "description": "whether to insert whitespace and newline as pseudo-glyphs in result (if at glyph level)",
           "default": false
         },
         "alternative_decoding": {

@@ -4,16 +4,28 @@ from __future__ import absolute_import
 import os
 import sys
 import codecs
+import logging
 from bisect import insort_left
+from math import ceil
 import json
 import click
 import numpy
 
 from ocrd_keraslm import lib
 
-@click.group()
+class SortedGroup(click.Group):
+    def list_commands(self, ctx):
+        commands = set(super(SortedGroup, self).list_commands(ctx))
+        commands0 = ['train', 'test', 'apply', 'generate', 'print-charset',
+                     'plot-char-embeddings-similarity', 'plot-context-embeddings-similarity',
+                     'plot-context-embeddings-projection']
+        commands0.extend(list(commands.difference(set(commands0))))
+        return commands0
+
+@click.group(cls=SortedGroup)
 def cli():
-    pass
+    logging.basicConfig(level=logging.DEBUG)
+    #pass
 
 @cli.command(short_help='train a language model')
 @click.option('-m', '--model', default="model.h5", help='model file', type=click.Path(dir_okay=False, writable=True))
@@ -58,8 +70,9 @@ def train(model, width, depth, length, val_data, data):
 
 @cli.command(short_help='get individual probabilities from language model')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-c', '--context', default=None, help='constant meta-data input')
 @click.argument('text', type=click.STRING) # todo: create custom click.ParamType for graph/FST input
-def apply(model, text):
+def apply(model, text, context):
     """Apply a language model to TEXT string and compute its individual probabilities.
 
        If TEXT is the symbol '-', the string will be read from standard input.
@@ -71,13 +84,12 @@ def apply(model, text):
     rater.configure()
     rater.load_weights(model)
     
-    if text:
-        if text[0] == u"-":
-            text = sys.stdin.read()
-    else:
-        pass
+    if text and text[0] == u"-":
+        text = sys.stdin.read()
+    if context:
+        context = list(map(lambda x: ceil(int(x)/10), context.split(' ')))
     
-    ratings, perplexity = rater.rate(text)
+    ratings, perplexity = rater.rate(text, context)
     click.echo(perplexity)
     click.echo(json.dumps(ratings, ensure_ascii=False))
     # much faster:
@@ -103,10 +115,11 @@ def test(model, data):
 @cli.command(short_help='sample characters from language model')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 @click.option('-n', '--number', default=1, help='number of characters to sample', type=click.IntRange(min=1, max=10000))
-@click.argument('context', type=click.STRING)
-# todo: also allow specifying follow-up context
-def generate(model, number, context):
-    """Apply a language model, generating the most probable characters (starting with CONTEXT string)."""
+@click.option('-c', '--context', default=None, help='constant meta-data input')
+@click.argument('prefix', type=click.STRING)
+# todo: also allow specifying suffix
+def generate(model, number, prefix, context):
+    """Apply a language model, generating the most probable characters (starting with PREFIX string)."""
 
     # load model
     rater = lib.Rater()
@@ -115,19 +128,24 @@ def generate(model, number, context):
     rater.incremental = True # but explicit state transfer
     rater.configure()
     rater.load_weights(model)
-
+    
+    if context:
+        context = list(map(lambda x: ceil(int(x)/10), context.split(' ')))
+    else:
+        context = rater.underspecify_contexts()
+        
     # initial state
-    context_states = [None]
-    # context (to get correct initial state)
-    for char in context[:-1]: # all but last character
-        _, context_states = rater.predict([char], context_states)
-    next_fringe = [lib.Node(state=context_states[0],
-                            value=context[-1], # last character
+    prefix_states = [None]
+    # prefix (to get correct initial state)
+    for char in prefix[:-1]: # all but last character
+        _, prefix_states = rater.predict([char], prefix_states, context=context)
+    next_fringe = [lib.Node(state=prefix_states[0],
+                            value=prefix[-1], # last character
                             cost=0.0)]
     # beam search
     for _ in range(0, number): # iterate over number of characters to be generated
         fringe = next_fringe
-        preds, states = rater.predict([n.value for n in fringe], [n.state for n in fringe])
+        preds, states = rater.predict([n.value for n in fringe], [n.state for n in fringe], context=context)
         next_fringe = []
         for j, n in enumerate(fringe): # iterate over batch
             pred = preds[j]
@@ -136,22 +154,53 @@ def generate(model, number, context):
             costs = -numpy.log(pred[pred_best])
             state = states[j]
             for best, cost in zip(pred_best, costs): # follow up on best predictions
-                if best not in rater.mapping[1]:
+                if best not in rater.mapping[1]: # avoid zero/unmapped
                     continue # ignore this alternative
                 n_new = lib.Node(parent=n, state=state, value=rater.mapping[1][best], cost=cost)
                 insort_left(next_fringe, n_new) # add alternative to tree
         next_fringe = next_fringe[:256] # keep 256-best paths (equals batch size)
     best = next_fringe[0] # best-scoring
     result = ''.join([n.value for n in best.to_sequence()])
-    click.echo(context[:-1] + result)
+    click.echo(prefix[:-1] + result)
 
-@cli.command(short_help='print mapped charset')
+@cli.command(short_help='Print the mapped characters')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 def print_charset(model):
     rater = lib.Rater()
     rater.load_config(model)
     rater.print_charset()
 
+@cli.command(short_help='Paint a heat map of character embeddings')
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
+@click.argument('filename', type=click.Path(dir_okay=False, writable=True))
+def plot_char_embeddings_similarity(model, filename):
+    rater = lib.Rater()
+    rater.load_config(model)
+    rater.configure()
+    rater.load_weights(model)
+    rater.plot_char_embeddings_similarity(filename)
+
+@cli.command(short_help='Paint a heat map of context embeddings')
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-n', '--number', default=1, help='which context variable', type=click.IntRange(min=1, max=100)) # see lib for contexts actually available
+@click.argument('filename', type=click.Path(dir_okay=False, writable=True))
+def plot_context_embeddings_similarity(model, filename, number):
+    rater = lib.Rater()
+    rater.load_config(model)
+    rater.configure()
+    rater.load_weights(model)
+    rater.plot_context_embeddings_similarity(filename, n=number)
+
+@cli.command(short_help='Paint a 2-d PCA projection of context embeddings')
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
+@click.option('-n', '--number', default=1, help='which context variable', type=click.IntRange(min=1, max=100)) # see lib for contexts actually available
+@click.argument('filename', type=click.Path(dir_okay=False, writable=True))
+def plot_context_embeddings_projection(model, filename, number):
+    rater = lib.Rater()
+    rater.load_config(model)
+    rater.configure()
+    rater.load_weights(model)
+    rater.plot_context_embeddings_projection(filename, n=number)
 
 if __name__ == '__main__':
     cli()

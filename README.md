@@ -1,26 +1,43 @@
 # ocrd_keraslm
-    Simple character-based language model using Keras
+    character-level language modelling using Keras
 
 
 ## Introduction
 
-This is a tool for statistical _language modelling_ (predicting text from context) with recurrent neural networks. It models probabilities not on the word level but the UTF-8 _byte level_. That way, there is no fixed vocabulary of known/allowed words/characters, and no word segmentation ambiguity. 
+This is a tool for statistical _language modelling_ (predicting text from context) with recurrent neural networks. It models probabilities not on the word level but the _character level_ so as to allow open vocabulary processing (avoiding morphology, historic orthography and word segmentation problems). It manages a vocabulary of mapped characters, which can be easily extended by training on more text. Above that, unmapped characters are treated with underspecification.
+
+In addition to character sequences, (meta-data) context variables can be configured as extra input. 
 
 ### Architecture
 
 The model consists of:
-1. no embedding layer: input bytes are represented as unit vectors ("one-hot coding") in 256 dimensions, in windows of a number `length` of bytes,
-2. a number `depth` of hidden layers, each with a number `width` of hidden recurrent units of _LSTM cells_ (Long Short-term Memory),
-3. a softmax output layer, returning a probability for each possible value of the next byte, respectively.
+0. an input layer: characters are represented as indexes from the vocabulary mapping, in windows of a number `length` of characters,
+1. a character embedding layer: window sequences are converted into dense vectors by looking up the indexes in an embedding weight matrix,
+2. a context embedding layer: context variables are converted into dense vectors by looking up the indexes in an embedding weight matrix, 
+3. character and context vector sequences are concatenated,
+4. a number `depth` of hidden layers: each with a number `width` of hidden recurrent units of _LSTM cells_ (Long Short-term Memory) connected on top of each other,
+5. an output layer derived from the transposed character embedding matrix (weight tying): hidden activations are projected linearly to vectors of dimensionality equal to the character vocabulary size, then softmax is applied returning a probability for each possible value of the next character, respectively.
 
-This is implemented in [Keras](https://keras.io) with [Tensorflow](https://www.tensorflow.org/) as backend. It automatically uses a fast CUDA-optimized LSTM implementation if available (Nividia GPU and Tensorflow installation with GPU support, see below), both in learning and in prediction phase. 
+The model is trained by feeding windows of text in index representation to the input layer, calculating output and comparing it to the same text shifted backward by 1 character, and represented as unit vectors ("one-hot coding") as target. The loss is calculated as the (unweighted) cross-entropy between target and output. Backpropagation yields error gradients for each layer, which is used to iteratively update the weights (stochastic gradient descent).
+
+This is implemented in [Keras](https://keras.io) with [Tensorflow](https://www.tensorflow.org/) as backend. It automatically uses a fast CUDA-optimized LSTM implementation (Nividia GPU and Tensorflow installation with GPU support, see below), both in learning and in prediction phase, if available.
 
 
 ### Modes of operation
 
-Notably, this model (by default) runs _statefully_, i.e. by implicitly passing hidden state from one window (batch) to the next. That way, the context available for predictions can be arbitrarily long (above `length`, e.g. the complete document up to that point), or short (below `length`, e.g. at the start of a text). (However, this is a passive perspective above `length`, because errors are never back-propagated any further in time during gradient-descent training.) 
+Notably, this model (by default) runs _statefully_, i.e. by implicitly passing hidden state from one window (batch of samples) to the next. That way, the context available for predictions can be arbitrarily long (above `length`, e.g. the complete document up to that point), or short (below `length`, e.g. at the start of a text). (However, this is a passive perspective above `length`, because errors are never back-propagated any further in time during gradient-descent training.) This is favourable to stateless mode because all characters can be output in parallel, and no partial windows need to be presented during training (which slows down).
 
 Besides stateful mode, the model can also be run _incrementally_, i.e. by explicitly passing hidden state from the caller. That way, multiple alternative hypotheses can be processed together. This is used for generation (sampling from the model) and alternative decoding (finding the best path through a sequence of alternatives).
+
+### Context conditioning
+
+Every text has meta-data like time, author, text type, genre, production features (e.g. print vs typewriter vs digital born rich text, OCR version), language, structural element (e.g. title vs heading vs paragraph vs footer vs marginalia), font family (e.g. Antiqua vs Fraktura) and font shape (e.g. bold vs letter-spaced vs italic vs normal) etc. 
+
+This information (however noisy) can be very useful to facilitate stochastic modelling, since language has an extreme diversity and complexity. To that end, models can be conditioned on extra inputs here, termed _context variables_. The model learns to represent these high-dimensional discrete values as low-dimensional continuous vectors (embeddings), also entering the recurrent hidden layers (as a form of simple additive adaptation).
+
+### Underspecification
+
+Index zero is reserved for unmapped characters (unseen contexts). During training, its embedding vector is regularised to occupy a center position of all mapped characters (all other contexts), and the hidden layers get to see it every now and then by random degradation. At runtime, therefore, some unknown character (some unknown context) represented as zero does not disturb follow-up predictions too much.
 
 
 ## Installation
@@ -65,18 +82,25 @@ Options:
   --help  Show this message and exit.
 
 Commands:
-  apply     get individual probabilities from language model
-  generate  sample characters from language model
-  test      get overall perplexity from language model
-  train     train a language model
+  train                           train a language model
+  test                            get overall perplexity from language model
+  apply                           get individual probabilities from language model
+  generate                        sample characters from language model
+  print-charset                   Print the mapped characters
+  plot-char-embeddings-similarity
+                                  Paint a heat map of character embeddings
+  plot-context-embeddings-similarity
+                                  Paint a heat map of context embeddings
+  plot-context-embeddings-projection
+                                  Paint a 2-d PCA projection of context embeddings
 ```
 
 Examples:
 ```shell
-keraslm-rate train --width 64 --depth 4 --length 256 --model model_dta_64_4_256.weights.h5 --config model_dta_64_4_256.config.pkl dta_komplett_2017-09-01/txt/*.tcf.txt
-keraslm-rate generate -m model_dta_64_4_256.weights.h5 -c model_dta_64_4_256.config.pkl --number 6 "für die Wiſſen"
-keraslm-rate apply -m model_dta_64_4_256.weights.h5 -c model_dta_64_4_256.config.pkl "so schädlich ist es Borkickheile zu pflanzen"
-keraslm-rate test -m model_dta_64_4_256.weights.h5 -c model_dta_64_4_256.config.pkl dta_komplett_2017-09-01/txt/grimm_*.tcf.txt
+keraslm-rate train --width 64 --depth 4 --length 256 --model model_dta_64_4_256.h5 dta_komplett_2017-09-01/txt/*.tcf.txt
+keraslm-rate generate -m model_dta_64_4_256.h5 --number 6 "für die Wiſſen"
+keraslm-rate apply -m model_dta_64_4_256.h5 "so schädlich ist es Borkickheile zu pflanzen"
+keraslm-rate test -m model_dta_64_4_256.h5 dta_komplett_2017-09-01/txt/grimm_*.tcf.txt
 ```
 
 ### [OCR-D processor](https://github.com/OCR-D/core) interface `ocrd-keraslm-rate`
@@ -95,14 +119,9 @@ To be used with [PageXML](https://www.primaresearch.org/tools/PAGELibraries) doc
       ],
       "description": "Rate each element of the text with a byte-level LSTM language model in Keras",
       "parameters": {
-        "weight_file": {
+        "model_file": {
           "type": "string",
-          "description": "path of h5 weight file for model trained with keraslm",
-          "required": true
-        },
-        "config_file": {
-          "type": "string",
-          "description": "path of pkl config file for model trained with keraslm",
+          "description": "path of h5py weight/config file for model trained with keraslm",
           "required": true
         },
         "textequiv_level": {
@@ -113,7 +132,7 @@ To be used with [PageXML](https://www.primaresearch.org/tools/PAGELibraries) doc
         },
         "add_space_glyphs": {
           "type": "boolean",
-          "description": "whether to insert whitespace and newline as pseudo-glyphs in result (at glyph level)",
+          "description": "whether to insert whitespace and newline as pseudo-glyphs in result (if at glyph level)",
           "default": false
         },
         "alternative_decoding": {
@@ -136,45 +155,16 @@ Examples:
 ```shell
 make deps-test # installs ocrd_tesserocr
 make test/assets # downloads GT, imports PageXML, builds workspaces
-ocrd workspace clone -a -l kant_aufklaerung_1784/mets.xml ws1
+ocrd workspace clone -a test/assets/kant_aufklaerung_1784/mets.xml ws1
 cd ws1
-ocrd-tesserocr-segment-region -I OCR-D-IMG -O OCR-D-SEG-BLOCK -p <(echo "{}")
-ocrd-tesserocr-segment-line -I OCR-D-SEG-BLOCK -O OCR-D-SEG-LINE -p <(echo "{}")
-cat <<EOF > param-tess-word.json
-{
-  "textequiv_level" : "word",
-  "model" : "Fraktur"
-}
-EOF
-cat <<EOF > param-tess-glyph.json
-{
-  "textequiv_level" : "glyph",
-  "model" : "deu-frak"
-}
-EOF
-ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-WORD -p param-tess-word.json
-ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-GLYPH -p param-tess-glyph.json
-cat <<EOF > param-lm-word-1.json
-{
-    "weight_file": "model_dta_64_4_256.weights.h5",
-    "config_file": "model_dta_64_4_256.config.pkl",
-    "textequiv_level": "word",
-    "add_space_glyphs": false,
-    "alternative_decoding": false
-}
-EOF
-cat <<EOF > param-lm-glyph-all.json
-{
-    "weight_file": "model_dta_64_4_256.weights.h5",
-    "config_file": "model_dta_64_4_256.config.pkl",
-    "textequiv_level": "glyph",
-    "add_space_glyphs": true,
-    "alternative_decoding": true,
-    "beam_width": 10
-}
-EOF
-ocrd-keraslm-rate -I OCR-D-OCR-TESS-WORD -O OCR-D-OCR-LM-WORD -p param-lm-word-1.json # get confidences and perplexity
-ocrd-keraslm-rate -I OCR-D-OCR-TESS-GLYPH -O OCR-D-OCR-LM-GLYPH -p param-lm-glyph-all.json # also get best path
+ocrd-tesserocr-segment-region -I OCR-D-IMG -O OCR-D-SEG-BLOCK
+ocrd-tesserocr-segment-line -I OCR-D-SEG-BLOCK -O OCR-D-SEG-LINE
+ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-WORD -p '{ "textequiv_level" : "word", "model" : "Fraktur" }'
+ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-GLYPH -p '{ "textequiv_level" : "glyph", "model" : "deu-frak" }'
+# get confidences and perplexity:
+ocrd-keraslm-rate -I OCR-D-OCR-TESS-WORD -O OCR-D-OCR-LM-WORD -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "word", "add_space_glyphs": false, "alternative_decoding": false }'
+# also get best path:
+ocrd-keraslm-rate -I OCR-D-OCR-TESS-GLYPH -O OCR-D-OCR-LM-GLYPH -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "glyph", "add_space_glyphs": true, "alternative_decoding": true, "beam_width": 10 }'
 ```
 
 ## Testing
@@ -186,8 +176,8 @@ Which is the equivalent of:
 ```shell
 pip install -r requirements_test.txt
 test -e test/assets || test/prepare_gt.bash test/assets
-test -f model_dta_test.weights.h5 -a -f model_dta_test.config.pkl || keraslm-rate train -m model_dta_test.weights.h5 -c model_dta_test.config.pkl test/assets/*.txt
-keraslm-rate test -m model_dta_test.weights.h5 -c model_dta_test.config.pkl test/assets/*.txt
+test -f model_dta_test.h5 || keraslm-rate train -m model_dta_test.h5 test/assets/*.txt
+keraslm-rate test -m model_dta_test.h5 test/assets/*.txt
 python -m pytest test $(PYTEST_ARGS)
 ```
 
