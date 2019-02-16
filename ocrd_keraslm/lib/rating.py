@@ -854,6 +854,7 @@ class Rater(object):
         size = len(text)
         sequences = []
         next_chars = []
+        i = 0
         for i in range(self.length if self.stateful else 0, size, steps):
             if isinstance(split, np.ndarray):
                 if (split[int(i/steps)] < self.validation_split) == train:
@@ -912,10 +913,10 @@ class Rater(object):
                 yield x, y
                 sequences = []
                 next_chars = []
-            if i + steps >= size and steps > 1: # last batch: 1 sample with partial length
-                next_chars.append(text[i+1: size])
-                sequences.append(text[i: size-1])
-                yield self._vectorize(sequences, next_chars, context, batch_size=1) # length=size-i-1 crashes predict_generator in stateful mode (return_sequences)
+        if i + steps >= size and steps > 1: # last batch: 1 sample with partial length
+            next_chars.append(text[i+1: size])
+            sequences.append(text[i: size-1])
+            yield self._vectorize(sequences, next_chars, context, batch_size=1) # length=size-i-1 crashes predict_generator in stateful mode (return_sequences)
     
     def _vectorize(self, inputs, outputs=None, contexts=None, length=None, batch_size=None):
         '''Convert a sequence of characters into numpy arrays.
