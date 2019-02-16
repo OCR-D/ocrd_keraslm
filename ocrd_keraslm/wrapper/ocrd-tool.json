@@ -10,23 +10,33 @@
       "steps": [
         "recognition/text-recognition"
       ],
-      "description": "Rate each element of the text with a byte-level LSTM language model in Keras",
+      "description": "Rate elements of the text with a character-level LSTM language model in Keras",
+      "input_file_grp": [
+        "OCR-D-OCR-TESS",
+        "OCR-D-OCR-KRAK",
+        "OCR-D-OCR-OCRO",
+        "OCR-D-OCR-CALA",
+        "OCR-D-OCR-ANY",
+        "OCR-D-COR-CIS",
+        "OCR-D-COR-ASV"
+      ],
+      "output_file_grp": [
+        "OCR-D-COR-LM"
+      ],
       "parameters": {
         "model_file": {
           "type": "string",
+          "format": "uri",
+          "content-type": "application/x-hdf;subtype=bag",
           "description": "path of h5py weight/config file for model trained with keraslm",
-          "required": true
+          "required": true,
+          "cacheable": true
         },
         "textequiv_level": {
           "type": "string",
           "enum": ["region", "line", "word", "glyph"],
           "default": "glyph",
           "description": "PAGE XML hierarchy level to evaluate TextEquiv sequences on"
-        },
-        "add_space_glyphs": {
-          "type": "boolean",
-          "description": "whether to insert whitespace and newline as pseudo-glyphs in result (if at glyph level)",
-          "default": false
         },
         "alternative_decoding": {
           "type": "boolean",

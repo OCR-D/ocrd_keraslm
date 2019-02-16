@@ -2,6 +2,7 @@ from __future__ import absolute_import
 from math import log, ceil
 
 from ocrd import Processor, MIMETYPE_PAGE
+from ocrd.validator.page_validator import PageValidator, ConsistencyError
 from ocrd.utils import getLogger, concat_padded, xywh_from_points, points_from_xywh
 from ocrd.model.ocrd_page import from_file, to_xml, GlyphType, CoordsType, TextEquivType
 from ocrd.model.ocrd_page_generateds import MetadataItemType, LabelsType, LabelType
@@ -17,6 +18,9 @@ CHOICE_THRESHOLD_CONF = 0.1 # maximum score drop from best choice to try per ele
 BEAM_CLUSTERING_ENABLE = True # enable pruning partial paths by history clustering
 BEAM_CLUSTERING_DIST = 5 # maximum distance between state vectors to form a cluster
 MAX_LENGTH = 500 # maximum string length of TextEquiv alternatives
+
+# similar to ocrd.validator.page_validator._HIERARCHY:
+_HIERARCHY = {'Page': 'region', 'TextRegion': 'line', 'TextLine': 'word', 'Word': 'glyph', 'Glyph': ''}
 
 class KerasRate(Processor):
     
@@ -69,10 +73,21 @@ class KerasRate(Processor):
                     context = [year]
                     # todo: author etc
             text = []
-            # white space at word boundaries, newline at line/region boundaries: required for LM input
-            # FIXME: tokenization ambiguity (i.e. segmenting punctuation into Word suffixes or extra elements)
-            #        is handled very differently between GT and ocrd_tesserocr annotation...
-            #        we can only reproduce segmentation if Word boundaries exactly coincide with white space!
+            # white space IFF between words, newline IFF between lines/regions: required for LM input
+            # as a minor mitigation, try to guess consistency a text annotation on multiple levels
+            # (i.e. infer wrong tokenisation when mother node has TextEquiv deviating from
+            #  concatenated child node TextEquivs only w.r.t. white-space):
+            report = PageValidator.validate(ocrd_page=pcgts, strictness='strict')
+            problems = {}
+            if not report.is_valid:
+                LOG.warning("Page validation failed: %s", report.to_xml())
+                if report.errors:
+                    for err in report.errors:
+                        if (isinstance(err, ConsistencyError) and
+                            _HIERARCHY[err.tag] == level and # relevant for current processing level
+                            err.actual and # not just a missing TextEquiv on super level
+                            len(err.actual.split()) != len(err.expected.split())): # only tokenisation
+                            problems[err.ID] = err
             regions = pcgts.get_Page().get_TextRegion()
             if not regions:
                 LOG.warning("Page contains no text regions")
@@ -80,14 +95,19 @@ class KerasRate(Processor):
             for region in regions:
                 if level == 'region':
                     LOG.debug("Getting text in region '%s'", region.id)
-                    if not first_region:
-                        text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
-                    first_region = False
                     textequivs = region.get_TextEquiv()
+                    # fixme: this won't happen as long as ocrd.validator.page_validator
+                    #        does not use the pcgts id (as there is no page.id)!
+                    if textequivs and repair_tokenisation(problems, pcgts.get_pcGtsId(), text, textequivs[0].Unicode, first_region):
+                        # likely cases: no newlines, or line feed
+                        pass # skip all rules for concatenation joints
+                    elif not first_region:
+                        text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
                     if textequivs:
                         text.append((region, filter_choices(textequivs)))
                     else:
                         LOG.warning("Region '%s' contains no text results", region.id)
+                    first_region = False
                     continue
                 lines = region.get_TextLine()
                 if not lines:
@@ -96,50 +116,42 @@ class KerasRate(Processor):
                 for line in lines:
                     if level == 'line':
                         LOG.debug("Getting text in line '%s'", line.id)
-                        if not first_line or not first_region:
-                            text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
-                        first_line = False
                         textequivs = line.get_TextEquiv()
+                        if textequivs and repair_tokenisation(problems, region.id, text, textequivs[0].Unicode, first_line):
+                            # likely cases: extra trailing newlines, or carriage-return
+                            pass # skip all rules for concatenation joints
+                        elif not first_line or not first_region:
+                            text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
                         if textequivs:
                             text.append((line, filter_choices(textequivs)))
                         else:
                             LOG.warning("Line '%s' contains no text results", line.id)
+                        first_line = False
                         continue
                     words = line.get_Word()
                     if not words:
                         LOG.warning("Line '%s' contains no words", line.id)
                     first_word = True
                     for word in words:
-                        if level == 'word':
-                            LOG.debug("Getting text in word '%s'", word.id)
-                            if not first_word:
-                                text.append((None, [TextEquivType(Unicode=u' ')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
-                            elif not first_line or not first_region:
-                                text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
-                            first_word = False
-                            textequivs = word.get_TextEquiv()
-                            if textequivs:
-                                text.append((word, filter_choices(textequivs)))
-                            else:
-                                LOG.warning("Word '%s' contains no text results", word.id)
-                            continue
                         space_char = None
-                        if not first_word:
+                        textequivs = word.get_TextEquiv()
+                        if textequivs and repair_tokenisation(problems, line.id, text, textequivs[0].Unicode, first_word):
+                            # likely cases: no spaces
+                            pass # skip all rules for concatenation joints
+                        elif not first_word:
                             space_char = u' '
                         elif not first_line or not first_region:
                             space_char = u'\n'
                         if space_char: # space required for LM input
-                            space_textequiv = TextEquivType(Unicode=space_char)
-                            if self.parameter['add_space_glyphs']:
-                                xywh = xywh_from_points(word.get_Coords().points)
-                                xywh['w'] = 0
-                                xywh['h'] = 0
-                                space_glyph = GlyphType(id='%s_space' % word.id,
-                                                        TextEquiv=[space_textequiv],
-                                                        Coords=CoordsType(points_from_xywh(xywh))) # empty box
-                                word.insert_Glyph_at(0, space_glyph) # add a pseudo glyph in annotation
+                            text.append((None, [TextEquivType(Unicode=space_char)])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                        if level == 'word':
+                            LOG.debug("Getting text in word '%s'", word.id)
+                            if textequivs:
+                                text.append((word, filter_choices(textequivs)))
                             else:
-                                text.append((None, [space_textequiv])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                                LOG.warning("Word '%s' contains no text results", word.id)
+                            first_word = False
+                            continue
                         glyphs = word.get_Glyph()
                         if not glyphs:
                             LOG.warning("Word '%s' contains no glyphs", word.id)
@@ -180,7 +192,7 @@ class KerasRate(Processor):
             else:
                 textstring = u''.join(textequivs[0].Unicode for element, textequivs in text) # same length as text
                 LOG.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
-                confidences = self.rater.rate(textstring, context, verbose=0) # much faster
+                confidences = self.rater.rate(textstring, context) # much faster
                 i = 0
                 for element, textequivs in text:
                     textequiv = textequivs[0] # 1st choice only
@@ -208,11 +220,11 @@ class KerasRate(Processor):
                             if level != 'word':
                                 for word in words:
                                     glyphs = word.get_Glyph()
-                                    word_unicode = u''.join(glyph.get_TextEquiv()[0].Unicode for glyph in glyphs)
+                                    word_unicode = u''.join(glyph.get_TextEquiv()[0].Unicode if glyph.get_TextEquiv() else u'' for glyph in glyphs)
                                     word.set_TextEquiv([TextEquivType(Unicode=word_unicode)]) # remove old
-                            line_unicode = u' '.join(word.get_TextEquiv()[0].Unicode for word in words)
+                            line_unicode = u' '.join(word.get_TextEquiv()[0].Unicode if word.get_TextEquiv() else u'' for word in words)
                             line.set_TextEquiv([TextEquivType(Unicode=line_unicode)]) # remove old
-                    region_unicode = u'\n'.join(line.get_TextEquiv()[0].Unicode for line in lines)
+                    region_unicode = u'\n'.join(line.get_TextEquiv()[0].Unicode if line.get_TextEquiv() else u'' for line in lines)
                     region.set_TextEquiv([TextEquivType(Unicode=region_unicode)]) # remove old
             file_id = concat_padded(self.output_file_grp, n)
             self.workspace.add_file(
@@ -234,3 +246,22 @@ def filter_choices(textequivs):
             return textequivs
     else:
         return []
+
+def repair_tokenisation(tokenisation_problems, identifier, running_hypothesis, next_token, first):
+    # tokenisation inconsistency does not apply if:
+    # - element id not contained in detected problem set
+    # - there is no TextEquiv to compare with at the next token
+    # - the element is first of its kind (i.e. must not start with white space anyway)
+    if identifier in tokenisation_problems and next_token and not first: 
+        # invariant: text should contain a representation that concatenates into actual tokenisation
+        tokenisation = tokenisation_problems[identifier].actual
+        concatenation = u''.join(map(lambda x: x[1][0].Unicode, running_hypothesis))
+        # ideally, both overlap (concatenation~tokenisation)
+        i = 0
+        for i in range(min(len(tokenisation), len(concatenation)), -1, -1):
+            if concatenation[-i:] == tokenisation[:i]:
+                break
+        if i > 0 and tokenisation[i:].startswith(next_token): # without white space?
+            LOG.warning('Repairing tokenisation between "%s" and "%s"', concatenation[-i:], next_token)
+            return True # repair by skipping space/newline here
+    return False
