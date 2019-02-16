@@ -1,5 +1,6 @@
 import os
 import codecs
+import unicodedata
 from random import shuffle
 from math import log, exp, ceil
 from bisect import insort_left
@@ -298,16 +299,14 @@ class Rater(object):
             training_epoch_size = 0
             with click.progressbar(training_data) as pbar:
                 for file in pbar:
-                    text = file.read()
-                    size = len(text)
+                    text, size = _read_normalize_file(file)
                     total_size += size
                     training_epoch_size += ceil((size-self.length)/steps/self.batch_size)
                     chars.update(set(text))
             validation_epoch_size = 0
             with click.progressbar(validation_data) as pbar:
                 for file in pbar:
-                    text = file.read()
-                    size = len(text)
+                    text, size = _read_normalize_file(file)
                     total_size += size
                     validation_epoch_size += ceil((size-self.length)/steps/self.batch_size)
                     chars.update(set(text))
@@ -317,8 +316,7 @@ class Rater(object):
             max_size = 0
             with click.progressbar(data) as pbar:
                 for file in pbar:
-                    text = file.read()
-                    size = len(text)
+                    text, size = _read_normalize_file(file)
                     total_size += size - self.length
                     max_size = max(max_size, size)
                     chars.update(set(text))
@@ -326,8 +324,7 @@ class Rater(object):
                 training_epoch_size = ceil(total_size/steps/self.batch_size)
                 with click.progressbar(val_data) as pbar:
                     for file in pbar:
-                        text = file.read()
-                        size = len(text)
+                        text, size = _read_normalize_file(file)
                         total_size += size - self.length
                 validation_epoch_size = ceil(total_size/steps/self.batch_size)
                 training_data = data
@@ -348,7 +345,7 @@ class Rater(object):
         self.mapping = (c_i, i_c)
 
         return training_data, validation_data, split, training_epoch_size, validation_epoch_size, total_size, steps
-
+    
     def reconfigure_for_mapping(self):
         '''Reconfigure character embedding layer after change of mapping (possibly transferring previous weights).'''
         
@@ -376,6 +373,52 @@ class Rater(object):
             else:
                 self.configure()
     
+    def remove_from_mapping(self, char=None, idx=None):
+        '''Remove one character from mapping and reconfigure embedding layer accordingly (transferring previous weights).'''
+        
+        assert self.status > 1
+        assert self.voc_size > 0
+        if not char and not idx:
+            return False
+        if char:
+            if char in self.mapping[0]:
+                idx = self.mapping[0][char]
+            else:
+                self.logger.error('unmapped character "%s" cannot be removed', char)
+                return False
+        else:
+            if idx in self.mapping[1]:
+                char = self.mapping[1][idx]
+            else:
+                self.logger.error('unmapped index "%d" cannot be removed', idx)
+                return False
+        embedding = self.model.get_layer(name='char_embedding').get_weights()[0]
+        norm = np.linalg.norm(embedding[idx, :])
+        self.logger.warning('pruning character "%s" [%d] with norm %f', char, idx, norm)
+        self.mapping[0].pop(char)
+        self.mapping[1].pop(idx)
+        for i in range(idx + 1, self.voc_size):
+            otherchar = self.mapping[1][i]
+            self.mapping[0][otherchar] -= 1
+            self.mapping[1][i-1] = otherchar
+            self.mapping[1].pop(i)
+        self.voc_size -= 1
+        embedding = np.delete(embedding, idx, 0)
+        # get old weights:
+        layer_weights = [layer.get_weights() for layer in self.model.layers]
+        # reconfigure with new mapping size (and new initializers):
+        self.configure()
+        # set old weights:
+        for layer, weights in zip(self.model.layers, layer_weights):
+            if layer.name == 'char_embedding':
+                # transfer weights from previous Embedding layer to new one:
+                layer.set_weights([embedding])
+            else:
+                # use old weights:
+                layer.set_weights(weights)
+        self.status = 2
+        return True
+    
     def test(self, test_data):
         '''Evaluate model on text files.
         
@@ -400,15 +443,14 @@ class Rater(object):
         steps = self.length if self.stateful else 1
         with click.progressbar(test_data) as pbar:
             for file in pbar:
-                text = file.read()
-                size = len(text)
+                text, size = _read_normalize_file(file)
                 epoch_size += ceil((size-1)/self.batch_size/steps)
         
         # todo: make iterator thread-safe and then use_multiprocesing=True
         loss, _accuracy = self.model.evaluate_generator(self._gen_data_from_files(test_data, steps), steps=epoch_size, verbose=1)
         return exp(loss)
     
-    def rate(self, text, context=None, verbose=1):
+    def rate(self, text, context=None):
         '''Rate a string all at once.
         
         Calculate the probabilities of the character sequence in `text`
@@ -427,10 +469,11 @@ class Rater(object):
         assert self.incremental is False # no explicit state transfer
         if not context:
             context = self.underspecify_contexts()
+        text = unicodedata.normalize('NFC', text)
         size = len(text)
         steps = self.length if self.stateful else 1
         epoch_size = ceil((size-1)/self.batch_size/steps)
-        preds = self.model.predict_generator(self._gen_data(text, context, steps), steps=epoch_size, verbose=verbose)
+        preds = self.model.predict_generator(self._gen_data(text, context, steps), steps=epoch_size, verbose=1)
         preds = preds.reshape((-1, self.voc_size))[0:size, :]
         
         # get predictions for true symbols (characters)
@@ -463,6 +506,7 @@ class Rater(object):
         assert self.incremental is False # no explicit state transfer
         if not context:
             context = self.underspecify_contexts()
+        text = unicodedata.normalize('NFC', text)
         x = np.zeros((1, 1 if self.stateful else self.length), dtype=np.uint32)
         zs = [np.zeros((1, 1 if self.stateful else self.length), dtype=np.uint32) for _ in context]
         entropy = 0
@@ -782,7 +826,7 @@ class Rater(object):
                 name = os.path.basename(file.name).split('.')[0]
                 author = name.split('_')[0]
                 year = ceil(int(name.split('_')[-1])/10)
-                yield from self._gen_data(file.read(), [year], steps, train, split)
+                yield from self._gen_data(_read_normalize_file(file)[0], [year], steps, train, split)
             if not repeat:
                 break # causes StopIteration exception if calculated epoch size is too large
 
@@ -930,6 +974,9 @@ class Rater(object):
         '''Print the mapped characters, newline-separated.'''
         for i, c in self.mapping[1].items():
             print('%d: "%s"' % (i, c))
+            char = unicodedata.normalize('NFC', c)
+            if c != char:
+                self.logger.warning('mapped character "%s" (%d) should have been normalized to "%s", which is %s mapped', c, i, char, 'also' if char in self.mapping[0] else 'not')
     
     def plot_char_embeddings_similarity(self, filename):
         '''Paint a heat map of character embeddings.
@@ -1110,3 +1157,9 @@ class Node(object):
         return self.cum_cost > other.cum_cost
     def __ge__(self, other):
         return self.cum_cost >= other.cum_cost
+
+def _read_normalize_file(fd):
+    text = unicodedata.normalize('NFC', fd.read())
+    size = len(text)
+    return text, size
+    

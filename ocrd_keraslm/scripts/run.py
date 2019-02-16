@@ -14,7 +14,7 @@ from ocrd_keraslm import lib
 class SortedGroup(click.Group):
     def list_commands(self, ctx):
         commands = set(super(SortedGroup, self).list_commands(ctx))
-        commands0 = ['train', 'test', 'apply', 'generate', 'print-charset',
+        commands0 = ['train', 'test', 'apply', 'generate', 'print-charset', 'prune-charset',
                      'plot-char-embeddings-similarity', 'plot-context-embeddings-similarity',
                      'plot-context-embeddings-projection']
         commands0.extend(list(commands.difference(set(commands0))))
@@ -142,6 +142,17 @@ def print_charset(model):
     rater.load_config(model)
     rater.print_charset()
 
+@cli.command(short_help='Delete one character from mapping')
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True, writable=True))
+@click.argument('char')
+def prune_charset(model, char):
+    rater = lib.Rater()
+    rater.load_config(model)
+    rater.configure()
+    rater.load_weights(model)
+    if rater.remove_from_mapping(char=char):
+        rater.save(model)
+    
 @cli.command(short_help='Paint a heat map of character embeddings')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 @click.argument('filename', type=click.Path(dir_okay=False, writable=True))
