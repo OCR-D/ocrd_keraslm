@@ -87,6 +87,7 @@ Commands:
   apply                           get individual probabilities from language model
   generate                        sample characters from language model
   print-charset                   Print the mapped characters
+  prune-charset                   Delete one character from mapping
   plot-char-embeddings-similarity
                                   Paint a heat map of character embeddings
   plot-context-embeddings-similarity
@@ -117,23 +118,33 @@ To be used with [PageXML](https://www.primaresearch.org/tools/PAGELibraries) doc
       "steps": [
         "recognition/text-recognition"
       ],
-      "description": "Rate each element of the text with a byte-level LSTM language model in Keras",
+      "description": "Rate elements of the text with a character-level LSTM language model in Keras",
+      "input_file_grp": [
+        "OCR-D-OCR-TESS",
+        "OCR-D-OCR-KRAK",
+        "OCR-D-OCR-OCRO",
+        "OCR-D-OCR-CALA",
+        "OCR-D-OCR-ANY",
+        "OCR-D-COR-CIS",
+        "OCR-D-COR-ASV"
+      ],
+      "output_file_grp": [
+        "OCR-D-COR-LM"
+      ],
       "parameters": {
         "model_file": {
           "type": "string",
+          "format": "uri",
+          "content-type": "application/x-hdf;subtype=bag",
           "description": "path of h5py weight/config file for model trained with keraslm",
-          "required": true
+          "required": true,
+          "cacheable": true
         },
         "textequiv_level": {
           "type": "string",
           "enum": ["region", "line", "word", "glyph"],
           "default": "glyph",
           "description": "PAGE XML hierarchy level to evaluate TextEquiv sequences on"
-        },
-        "add_space_glyphs": {
-          "type": "boolean",
-          "description": "whether to insert whitespace and newline as pseudo-glyphs in result (if at glyph level)",
-          "default": false
         },
         "alternative_decoding": {
           "type": "boolean",
@@ -162,9 +173,9 @@ ocrd-tesserocr-segment-line -I OCR-D-SEG-BLOCK -O OCR-D-SEG-LINE
 ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-WORD -p '{ "textequiv_level" : "word", "model" : "Fraktur" }'
 ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-GLYPH -p '{ "textequiv_level" : "glyph", "model" : "deu-frak" }'
 # get confidences and perplexity:
-ocrd-keraslm-rate -I OCR-D-OCR-TESS-WORD -O OCR-D-OCR-LM-WORD -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "word", "add_space_glyphs": false, "alternative_decoding": false }'
+ocrd-keraslm-rate -I OCR-D-OCR-TESS-WORD -O OCR-D-OCR-LM-WORD -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "word", "alternative_decoding": false }'
 # also get best path:
-ocrd-keraslm-rate -I OCR-D-OCR-TESS-GLYPH -O OCR-D-OCR-LM-GLYPH -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "glyph", "add_space_glyphs": true, "alternative_decoding": true, "beam_width": 10 }'
+ocrd-keraslm-rate -I OCR-D-OCR-TESS-GLYPH -O OCR-D-OCR-LM-GLYPH -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "glyph", "alternative_decoding": true, "beam_width": 10 }'
 ```
 
 ## Testing

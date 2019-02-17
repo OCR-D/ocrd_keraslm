@@ -1,5 +1,9 @@
 # BEGIN-EVAL makefile-parser --make-help Makefile
 
+SHELL = /bin/bash
+PYTHON = python
+PIP = pip
+
 help:
 	@echo ""
 	@echo "  Targets"
@@ -13,18 +17,18 @@ help:
 # END-EVAL
 
 deps:
-	pip install -r requirements.txt
+	$(PIP) install -r requirements.txt
 
 deps-test:
-	pip install -r requirements_test.txt
+	$(PIP) install -r requirements_test.txt
 
 install:
-	pip install -e .
+	$(PIP) install -e .
 
 test: test/assets
-	test -f model_dta_test.weights.h5 -a -f model_dta_test.config.pkl || keraslm-rate train -m model_dta_test.weights.h5 -c model_dta_test.config.pkl test/assets/*.txt
-	keraslm-rate test -m model_dta_test.weights.h5 -c model_dta_test.config.pkl test/assets/*.txt
-	python -m pytest test $(PYTEST_ARGS)
+	test -f model_dta_test.h5 || keraslm-rate train -m model_dta_test.h5 test/assets/*.txt
+	keraslm-rate test -m model_dta_test.h5 test/assets/*.txt
+	$(PYTHON) -m pytest test $(PYTEST_ARGS)
 
 test/assets:
 	test/prepare_gt.bash $@

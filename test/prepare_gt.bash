@@ -58,7 +58,7 @@ for GT_FILE in $GT_FILES; do
     popd
 done
 
-# this would break URIs:
+# this would break URIs: (still true for ocrd v0.15.2 !!)
 #mv "$TMP_DIR" "$1" # atomic
 # clone+cp instead:
 trap "rm -fr '$TMP_DIR' '$1'" ERR
@@ -66,11 +66,13 @@ mkdir -p "$1"
 for GT_FILE in $GT_FILES; do # not so atomic
     WORKSPACE="$TMP_DIR/$GT_FILE/$GT_FILE"
     ocrd workspace clone -l "$WORKSPACE/mets.xml" "$1/$GT_FILE"
-    for PAGE_FILE in "$1/$GT_FILE/OCR-D-GT-PAGE/"*.xml; do # workaround for OCR-D/core issue #176
+    # workaround for OCR-D/core/issues/176 (still true for ocrd v0.15.2 !!)
+    for PAGE_FILE in "$1/$GT_FILE/OCR-D-GT-PAGE/"*.xml; do
         sed -ie "s|imageFilename=\"|imageFilename=\"file://$PWD/$1/$GT_FILE/OCR-D-IMG/|" "$PAGE_FILE"
     done
     cp "$TMP_DIR/${GT_FILE}.txt" "$1"
 done
 rm -fr "$TMP_DIR"
+
 
 
