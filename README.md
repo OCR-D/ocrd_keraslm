@@ -11,12 +11,15 @@ In addition to character sequences, (meta-data) context variables can be configu
 ### Architecture
 
 The model consists of:
+
 0. an input layer: characters are represented as indexes from the vocabulary mapping, in windows of a number `length` of characters,
 1. a character embedding layer: window sequences are converted into dense vectors by looking up the indexes in an embedding weight matrix,
 2. a context embedding layer: context variables are converted into dense vectors by looking up the indexes in an embedding weight matrix, 
 3. character and context vector sequences are concatenated,
 4. a number `depth` of hidden layers: each with a number `width` of hidden recurrent units of _LSTM cells_ (Long Short-term Memory) connected on top of each other,
 5. an output layer derived from the transposed character embedding matrix (weight tying): hidden activations are projected linearly to vectors of dimensionality equal to the character vocabulary size, then softmax is applied returning a probability for each possible value of the next character, respectively.
+
+![model graph depiction](model-graph.png "graph with 1 context variable")
 
 The model is trained by feeding windows of text in index representation to the input layer, calculating output and comparing it to the same text shifted backward by 1 character, and represented as unit vectors ("one-hot coding") as target. The loss is calculated as the (unweighted) cross-entropy between target and output. Backpropagation yields error gradients for each layer, which is used to iteratively update the weights (stochastic gradient descent).
 
@@ -106,7 +109,7 @@ keraslm-rate test -m model_dta_64_4_256.h5 dta_komplett_2017-09-01/txt/grimm_*.t
 
 ### [OCR-D processor](https://github.com/OCR-D/core) interface `ocrd-keraslm-rate`
 
-To be used with [PageXML](https://www.primaresearch.org/tools/PAGELibraries) documents in an [OCR-D](https://github.com/OCR-D/spec/) annotation workflow.
+To be used with [PageXML](https://www.primaresearch.org/tools/PAGELibraries) documents in an [OCR-D](https://github.com/OCR-D/spec/) annotation workflow. Input could be anything with a textual annotation (`TextEquiv` on the given `textequiv_level`). The LM rater could be used for both quality control (without alternative decoding, using only each first index `TextEquiv`) and part of post-correction (with `alternative_decoding=True`, finding the best path among `TextEquiv` indexes).
 
 ```json
   "tools": {
