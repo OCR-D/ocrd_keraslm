@@ -189,6 +189,7 @@ class Rater(object):
         lowrank = K.sum(K.square(embedding_matrix)) # generalization/sparsity
         vecs1 = K.slice(embedding_matrix, [1, 0], [em_dims[0]-2, em_dims[1]]) # all vectors except zero and last
         vecs2 = K.slice(embedding_matrix, [2, 0], [em_dims[0]-2, em_dims[1]]) # all vectors except zero and first
+        vecs1 = K.stop_gradient(vecs1) # make sure only vecs2 is affected, i.e. t is not influenced by t+1
         smoothness = K.sum(K.square(vecs1 - vecs2)) # dist(t, t+1)
         # todo: learn adjacency matrix for categorical meta-data (update every epoch)
         vec0 = K.slice(embedding_matrix, [0, 0], [1, em_dims[1]])            # zero vector only,
