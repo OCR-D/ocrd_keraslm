@@ -93,14 +93,14 @@ class Rater(object):
         input_args['dtype'] = 'int32'
 
         # input layers:
-        char_input = Input(**input_args, name='char_input')
+        char_input = Input(name='char_input', **input_args)
         char_embedding = Embedding(self.voc_size, self.width, # (self.width - context_width)
                                    embeddings_initializer=RandomNormal(stddev=0.001),
                                    embeddings_regularizer=self._regularise_chars, # see below
                                    name='char_embedding')
         char_hidden = char_embedding(char_input) # mask_zero=True does not work with CuDNNLSTM
         
-        context_inputs = [Input(**input_args, name='context1_input')] # context variable year # todo: author etc (meta-data)
+        context_inputs = [Input(name='context1_input', **input_args)] # context variable year # todo: author etc (meta-data)
         context_embeddings = [Embedding(200, 10, # year/10 from 0 to 2000 AD; 10 outdim seems fair
                                         embeddings_initializer=RandomNormal(stddev=0.001),
                                         embeddings_regularizer=self._regularise_contexts, # crucial, see below
@@ -127,8 +127,8 @@ class Rater(object):
                 args['recurrent_activation'] = 'sigmoid' # instead of default 'hard_sigmoid' which deviates from CuDNNLSTM
             if self.incremental:
                 # incremental prediction needs additional inputs and outputs for state (h,c):
-                states = [Input(**states_input_args, name='initial_h_%d_input' % (i+1)),
-                          Input(**states_input_args, name='initial_c_%d_input' % (i+1))]
+                states = [Input(name='initial_h_%d_input' % (i+1), **states_input_args),
+                          Input(name='initial_c_%d_input' % (i+1), **states_input_args)]
                 layer = lstm(self.width, return_state=True, **args)
                 model_states_input.extend(states)
                 model_output, state_h, state_c = layer(model_output, initial_state=states)

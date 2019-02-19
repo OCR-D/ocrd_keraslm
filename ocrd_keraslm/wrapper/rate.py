@@ -46,7 +46,7 @@ class KerasRate(Processor):
     
     def process(self):
         """
-        Performs the rating.
+        Rates textual annotation of PAGE input files, producing output files with LM scores (and choices).
         """
         level = self.parameter['textequiv_level']
         beam_width = self.parameter['beam_width']
@@ -54,6 +54,8 @@ class KerasRate(Processor):
             LOG.info("INPUT FILE %i / %s", n, input_file)
             pcgts = from_file(self.workspace.download_file(input_file))
             LOG.info("Scoring text in page '%s' at the %s level", pcgts.get_pcGtsId(), level)
+            
+            # annotate processing metadata:
             metadata = pcgts.get_Metadata() # ensured by from_file()
             metadata.add_MetadataItem(
                 MetadataItemType(type_="processingStep",
@@ -63,6 +65,8 @@ class KerasRate(Processor):
                                                     Label=[LabelType(type_=name,
                                                                      value=self.parameter[name])
                                                            for name in self.parameter.keys()])]))
+            
+            # context preprocessing:
             # todo: as soon as we have true MODS meta-data in METS (dmdSec/mdWrap/xmlData/mods),
             #       get global context variables from there (e.g. originInfo/dateIssued/@text for year)
             ident = self.workspace.mets.unique_identifier # at least try to get purl
@@ -74,125 +78,15 @@ class KerasRate(Processor):
                     year = ceil(int(year)/10)
                     context = [year]
                     # todo: author etc
-            # create a graph from the linear sequence of elements at the given level
-            graph = nx.DiGraph(level=level) # initialise directed unigraph with global attribute level
-            graph.add_node(0)
-            start_node = 0
-            # white space IFF between words, newline IFF between lines/regions: required for LM input
-            # as a minor mitigation, try to guess consistency a text annotation on multiple levels
-            # (i.e. infer wrong tokenisation when mother node has TextEquiv deviating from
-            #  concatenated child node TextEquivs only w.r.t. white-space):
-            report = PageValidator.validate(ocrd_page=pcgts, strictness='strict')
-            problems = {}
-            if not report.is_valid:
-                LOG.warning("Page validation failed: %s", report.to_xml())
-                if report.errors:
-                    for err in report.errors:
-                        if (isinstance(err, ConsistencyError) and
-                            _HIERARCHY[err.tag] == level and # relevant for current processing level
-                            err.actual and # not just a missing TextEquiv on super level
-                            len(err.actual.split()) != len(err.expected.split())): # only tokenisation
-                            problems[err.ID] = err
-            regions = pcgts.get_Page().get_TextRegion()
-            if not regions:
-                LOG.warning("Page contains no text regions")
-            page_start_node = start_node
-            first_region = True
-            for region in regions:
-                if level == 'region':
-                    graph.add_node(start_node + 1)
-                    LOG.debug("Getting text in region '%s'", region.id)
-                    textequivs = region.get_TextEquiv()
-                    # fixme: this won't happen as long as ocrd.validator.page_validator
-                    #        does not use the pcgts id (as there is no page.id)!
-                    if textequivs and repair_tokenisation(problems, pcgts.get_pcGtsId(), graph, 0, textequivs[0].Unicode, first_region):
-                        # likely cases: no newlines, or line feed
-                        pass # skip all rules for concatenation joints
-                    elif not first_region:
-                        graph.add_edge(start_node, start_node + 1, element=None, alternatives=[TextEquivType(Unicode=u'\n', conf=1.0)]) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
-                        start_node += 1
-                        graph.add_node(start_node + 1)
-                    if textequivs:
-                        graph.add_edge(start_node, start_node + 1, element=region, alternatives=filter_choices(textequivs))
-                        start_node += 1
-                    else:
-                        LOG.warning("Region '%s' contains no text results", region.id)
-                    first_region = False
-                    continue
-                lines = region.get_TextLine()
-                if not lines:
-                    LOG.warning("Region '%s' contains no text lines", region.id)
-                region_start_node = start_node
-                first_line = True
-                for line in lines:
-                    if level == 'line':
-                        graph.add_node(start_node + 1)
-                        LOG.debug("Getting text in line '%s'", line.id)
-                        textequivs = line.get_TextEquiv()
-                        if textequivs and repair_tokenisation(problems, region.id, graph, region_start_node, textequivs[0].Unicode, first_line):
-                            # likely cases: extra trailing newlines, or carriage-return
-                            pass # skip all rules for concatenation joints
-                        elif not first_line or not first_region:
-                            graph.add_edge(start_node, start_node + 1, element=None, alternatives=[TextEquivType(Unicode=u'\n', conf=1.0)]) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
-                            start_node += 1
-                            graph.add_node(start_node + 1)
-                        if textequivs:
-                            graph.add_edge(start_node, start_node + 1, element=line, alternatives=filter_choices(textequivs))
-                            start_node += 1
-                        else:
-                            LOG.warning("Line '%s' contains no text results", line.id)
-                        first_line = False
-                        continue
-                    words = line.get_Word()
-                    if not words:
-                        LOG.warning("Line '%s' contains no words", line.id)
-                    line_start_node = start_node
-                    first_word = True
-                    for word in words:
-                        space_char = None
-                        textequivs = word.get_TextEquiv()
-                        if textequivs and repair_tokenisation(problems, line.id, graph, line_start_node, textequivs[0].Unicode, first_word):
-                            # likely cases: no spaces
-                            pass # skip all rules for concatenation joints
-                        elif not first_word:
-                            space_char = u' '
-                        elif not first_line or not first_region:
-                            space_char = u'\n'
-                        if space_char: # space required for LM input
-                            graph.add_node(start_node + 1)
-                            graph.add_edge(start_node, start_node + 1, element=None, alternatives=[TextEquivType(Unicode=space_char, conf=1.0)]) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
-                            start_node += 1
-                        if level == 'word':
-                            graph.add_node(start_node + 1)
-                            LOG.debug("Getting text in word '%s'", word.id)
-                            if textequivs:
-                                graph.add_edge(start_node, start_node + 1, element=word, alternatives=filter_choices(textequivs))
-                                start_node += 1
-                            else:
-                                LOG.warning("Word '%s' contains no text results", word.id)
-                            first_word = False
-                            continue
-                        glyphs = word.get_Glyph()
-                        if not glyphs:
-                            LOG.warning("Word '%s' contains no glyphs", word.id)
-                        for glyph in glyphs:
-                            graph.add_node(start_node + 1)
-                            LOG.debug("Getting text in glyph '%s'", glyph.id)
-                            textequivs = glyph.get_TextEquiv()
-                            if textequivs:
-                                graph.add_edge(start_node, start_node + 1, element=glyph, alternatives=filter_choices(textequivs))
-                                start_node += 1
-                            else:
-                                LOG.warning("Glyph '%s' contains no text results", glyph.id)
-                        first_word = False
-                    first_line = False
-                first_region = False
+            
+            # create a graph for the linear sequence of elements at the given level:
+            graph, start_node, end_node = page_get_linear_graph_at(level, pcgts)
+            
             # apply language model to (TextEquiv path in) graph,
             # remove non-path TextEquivs, modify confidences:
-            pathlen = start_node - page_start_node
             if self.parameter['alternative_decoding']:
-                LOG.info("Rating %d elements including its alternatives", pathlen)
-                path, entropy = self.rater.rate_best(graph, page_start_node, start_node,
+                LOG.info("Rating %d elements including its alternatives", end_node - start_node)
+                path, entropy = self.rater.rate_best(graph, start_node, end_node,
                                                      context=context,
                                                      lm_weight=1.0, # no influence of input confidence
                                                      max_length=MAX_LENGTH,
@@ -212,10 +106,10 @@ class KerasRate(Processor):
                 ent = entropy/strlen
                 avg = pow(2.0, -ent)
                 ppl = pow(2.0, ent) # character level
-                ppll = pow(2.0, ent * strlen/pathlen) # textequiv level (including spaces/newlines)
+                ppll = pow(2.0, ent * strlen/(end_node - start_node)) # textequiv level (including spaces/newlines)
                 LOG.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
             else:
-                text = [(graph.edges[in_, out]['element'], graph.edges[in_, out]['alternatives']) for in_, out in nx.bfs_edges(graph, 0)] # graph's path
+                text = [(edge['element'], edge['alternatives']) for edge in _get_edges(graph, 0)] # graph's path
                 textstring = u''.join(textequivs[0].Unicode for element, textequivs in text) # same length as text
                 LOG.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
                 confidences = self.rater.rate(textstring, context) # much faster
@@ -235,23 +129,11 @@ class KerasRate(Processor):
                 ppl = pow(2.0, ent) # character level
                 ppll = pow(2.0, ent * len(confidences)/len(text)) # textequiv level (including spaces/newlines)
                 LOG.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
+            
             # ensure parent textequivs are up to date:
-            regions = pcgts.get_Page().get_TextRegion()
-            if level != 'region':
-                for region in regions:
-                    lines = region.get_TextLine()
-                    if level != 'line':
-                        for line in lines:
-                            words = line.get_Word()
-                            if level != 'word':
-                                for word in words:
-                                    glyphs = word.get_Glyph()
-                                    word_unicode = u''.join(glyph.get_TextEquiv()[0].Unicode if glyph.get_TextEquiv() else u'' for glyph in glyphs)
-                                    word.set_TextEquiv([TextEquivType(Unicode=word_unicode)]) # remove old
-                            line_unicode = u' '.join(word.get_TextEquiv()[0].Unicode if word.get_TextEquiv() else u'' for word in words)
-                            line.set_TextEquiv([TextEquivType(Unicode=line_unicode)]) # remove old
-                    region_unicode = u'\n'.join(line.get_TextEquiv()[0].Unicode if line.get_TextEquiv() else u'' for line in lines)
-                    region.set_TextEquiv([TextEquivType(Unicode=region_unicode)]) # remove old
+            page_update_higher_textequiv_levels(level, pcgts)
+            
+            # write back result
             file_id = concat_padded(self.output_file_grp, n)
             self.workspace.add_file(
                 ID=file_id,
@@ -261,7 +143,168 @@ class KerasRate(Processor):
                 content=to_xml(pcgts),
             )
 
-def filter_choices(textequivs):
+def page_get_linear_graph_at(level, pcgts):
+    problems = _page_get_tokenisation_problems(level, pcgts)
+    
+    graph = nx.DiGraph(level=level) # initialise directed unigraph
+    graph.add_node(0)
+    start_node = 0
+    regions = pcgts.get_Page().get_TextRegion()
+    if not regions:
+        LOG.warning("Page contains no text regions")
+    page_start_node = start_node
+    first_region = True
+    for region in regions:
+        if level == 'region':
+            LOG.debug("Getting text in region '%s'", region.id)
+            textequivs = region.get_TextEquiv()
+            if not first_region:
+                start_node = _add_space(graph, start_node, '\n',
+                                        page_start_node, problems.get(pcgts.get_pcGtsId()), 
+                                        textequivs)
+            if textequivs:
+                start_node = _add_element(graph, start_node, region, textequivs)
+            else:
+                LOG.warning("Region '%s' contains no text results", region.id)
+            first_region = False
+            continue
+        lines = region.get_TextLine()
+        if not lines:
+            LOG.warning("Region '%s' contains no text lines", region.id)
+        region_start_node = start_node
+        first_line = True
+        for line in lines:
+            if level == 'line':
+                LOG.debug("Getting text in line '%s'", line.id)
+                textequivs = line.get_TextEquiv()
+                if not first_line or not first_region:
+                    start_node = _add_space(graph, start_node, '\n',
+                                            region_start_node, not first_line and problems.get(region.id), 
+                                            textequivs)
+                if textequivs:
+                    start_node = _add_element(graph, start_node, line, textequivs)
+                else:
+                    LOG.warning("Line '%s' contains no text results", line.id)
+                first_line = False
+                continue
+            words = line.get_Word()
+            if not words:
+                LOG.warning("Line '%s' contains no words", line.id)
+            line_start_node = start_node
+            first_word = True
+            for word in words:
+                textequivs = word.get_TextEquiv()
+                if not first_word or not first_line or not first_region:
+                    start_node = _add_space(graph, start_node, '\n' if first_word else ' ',
+                                            line_start_node, not first_word and problems.get(line.id), 
+                                            textequivs)
+                if level == 'word':
+                    LOG.debug("Getting text in word '%s'", word.id)
+                    if textequivs:
+                        start_node = _add_element(graph, start_node, word, textequivs)
+                    else:
+                        LOG.warning("Word '%s' contains no text results", word.id)
+                    first_word = False
+                    continue
+                glyphs = word.get_Glyph()
+                if not glyphs:
+                    LOG.warning("Word '%s' contains no glyphs", word.id)
+                for glyph in glyphs:
+                    LOG.debug("Getting text in glyph '%s'", glyph.id)
+                    textequivs = glyph.get_TextEquiv()
+                    if textequivs:
+                        start_node = _add_element(graph, start_node, glyph, textequivs)
+                    else:
+                        LOG.warning("Glyph '%s' contains no text results", glyph.id)
+                first_word = False
+            first_line = False
+        first_region = False
+    return graph, page_start_node, start_node
+
+def page_update_higher_textequiv_levels(level, pcgts):
+    '''Update the TextEquivs of all PAGE-XML hierarchy levels above `level` for consistency.
+    
+    Starting with the hierarchy level chosen for processing, 
+    join all first TextEquiv (by the rules governing the respective level)
+    into TextEquiv of the next higher level, replacing them.
+    '''
+    regions = pcgts.get_Page().get_TextRegion()
+    if level != 'region':
+        for region in regions:
+            lines = region.get_TextLine()
+            if level != 'line':
+                for line in lines:
+                    words = line.get_Word()
+                    if level != 'word':
+                        for word in words:
+                            glyphs = word.get_Glyph()
+                            word_unicode = u''.join(glyph.get_TextEquiv()[0].Unicode if glyph.get_TextEquiv() else u'' for glyph in glyphs)
+                            word.set_TextEquiv([TextEquivType(Unicode=word_unicode)]) # remove old
+                    line_unicode = u' '.join(word.get_TextEquiv()[0].Unicode if word.get_TextEquiv() else u'' for word in words)
+                    line.set_TextEquiv([TextEquivType(Unicode=line_unicode)]) # remove old
+            region_unicode = u'\n'.join(line.get_TextEquiv()[0].Unicode if line.get_TextEquiv() else u'' for line in lines)
+            region.set_TextEquiv([TextEquivType(Unicode=region_unicode)]) # remove old
+
+def _page_get_tokenisation_problems(level, pcgts):
+    # white space IFF between words, newline IFF between lines/regions: required for LM input
+    # as a minor mitigation, try to guess consistency a text annotation on multiple levels
+    # (i.e. infer wrong tokenisation when mother node has TextEquiv deviating from
+    #  concatenated child node TextEquivs only w.r.t. white-space):
+    report = PageValidator.validate(ocrd_page=pcgts, strictness='strict')
+    problems = {}
+    if not report.is_valid:
+        LOG.warning("Page validation failed: %s", report.to_xml())
+        if report.errors:
+            for err in report.errors:
+                if (isinstance(err, ConsistencyError) and
+                    _HIERARCHY[err.tag] == level and # relevant for current processing level
+                    err.actual and # not just a missing TextEquiv on super level
+                    len(err.actual.split()) != len(err.expected.split())): # only tokenisation
+                    problems[err.ID] = err
+    return problems
+
+def _add_element(graph, start_node, element, textequivs):
+    graph.add_node(start_node + 1)
+    graph.add_edge(start_node, start_node + 1, 
+                   element=element, 
+                   alternatives=_filter_choices(textequivs))
+    return start_node + 1
+
+def _add_space(graph, start_node, space, last_start_node, problem, textequivs):
+    """add a pseudo-element edge for the white-space string `space` to `graph`,
+    between `start_node` and new node `start_node`+1, except if there is a 
+    tokenisation `problem` involving the first textequiv in the graph's current tip"""
+    # tokenisation inconsistency does not apply if:
+    # - element id not contained in detected problem set
+    # - there is no TextEquiv to compare with at the next token
+    # - the element is first of its kind (i.e. must not start with white space anyway)
+    if (textequivs and textequivs[0].Unicode and problem and
+        _repair_tokenisation(problem.actual, 
+                             u''.join(map(lambda x: x['alternatives'][0].Unicode, _get_edges(graph, last_start_node))),
+                             textequivs[0].Unicode)):
+        pass # skip all rules for concatenation joins
+    else: # joining space required for LM input here?
+        start_node = _add_element(graph, start_node, None, [TextEquivType(Unicode=space, conf=1.0)])
+        # LM output will not appear in annotation
+        # (so conf cannot be combined to accurate perplexity from output)
+    return start_node
+
+def _repair_tokenisation(tokenisation, concatenation, next_token):
+    # invariant: text should contain a representation that concatenates into actual tokenisation
+    # ideally, both overlap (concatenation~tokenisation)
+    i = 0
+    for i in range(min(len(tokenisation), len(concatenation)), -1, -1):
+        if concatenation[-i:] == tokenisation[:i]:
+            break
+    if i > 0 and tokenisation[i:].startswith(next_token): # without white space?
+        LOG.warning('Repairing tokenisation between "%s" and "%s"', concatenation[-i:], next_token)
+        return True # repair by skipping space/newline here
+    return False
+
+def _get_edges(graph, start_node):
+    return [graph.edges[in_, out] for in_, out in nx.bfs_edges(graph, start_node)]
+
+def _filter_choices(textequivs):
     '''assuming `textequivs` are already sorted by input confidence (conf attribute), ensure maximum number and maximum relative threshold'''
     textequivs = textequivs[:min(CHOICE_THRESHOLD_NUM, len(textequivs))]
     if textequivs:
@@ -273,21 +316,3 @@ def filter_choices(textequivs):
     else:
         return []
 
-def repair_tokenisation(tokenisation_problems, identifier, running_hypothesis, start_node, next_token, first):
-    # tokenisation inconsistency does not apply if:
-    # - element id not contained in detected problem set
-    # - there is no TextEquiv to compare with at the next token
-    # - the element is first of its kind (i.e. must not start with white space anyway)
-    if identifier in tokenisation_problems and next_token and not first: 
-        # invariant: text should contain a representation that concatenates into actual tokenisation
-        tokenisation = tokenisation_problems[identifier].actual
-        concatenation = u''.join(map(lambda x: running_hypothesis.edges[x[0], x[1]]['alternatives'][0].Unicode, nx.bfs_edges(running_hypothesis, start_node)))
-        # ideally, both overlap (concatenation~tokenisation)
-        i = 0
-        for i in range(min(len(tokenisation), len(concatenation)), -1, -1):
-            if concatenation[-i:] == tokenisation[:i]:
-                break
-        if i > 0 and tokenisation[i:].startswith(next_token): # without white space?
-            LOG.warning('Repairing tokenisation between "%s" and "%s"', concatenation[-i:], next_token)
-            return True # repair by skipping space/newline here
-    return False
