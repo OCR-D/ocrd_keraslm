@@ -27,9 +27,10 @@ class Rater(object):
     Interfaces:
     - `Rater.train`/`scripts.run.train` : file handles of character sequences
     - `Rater.test`/`scripts.run.test` : file handles of character sequences
-    - `Rater.rate`/`scripts.run.apply` : character string
-    - `Rater.rate_once`/`wrapper.rate` : character string
-    - `Rater.rate_single`/`scripts.run.generate` or `wrapper.rate` :
+    - `Rater.rate2`/`scripts.run.apply` : character string
+    - `Rater.rate`/`wrapper.rate` : character string
+    - `Rater.rate_best`/`wrapper.rate` : lattice graph
+    - `Rater.generate`/`scripts.run.generate` :
       alternative list of characters and states
     '''
     
@@ -501,7 +502,7 @@ class Rater(object):
         Return a list of character-probability tuples, and the overall perplexity.
         '''
         
-        # prediction calculation is a lot slower that way than via batched generator, cf. rate_once() / test()
+        # prediction calculation is a lot slower that way than via batched generator, cf. rate() / test()
         # perplexity calculation is a lot slower that way than via tensor metric, cf. test()
         assert self.status > 1
         assert self.incremental is False # no explicit state transfer
@@ -553,7 +554,7 @@ class Rater(object):
         
         (To be called by an adapter tracking history paths and input alternatives,
          combining them up to a maximum number of best running candidates, i.e. beam.
-         See `scripts.run.generate` and `wrapper.rate` and `lib.Node`.)
+         See `lib.generate` and `wrapper.rate` and `lib.Node`.)
         (Requires the model to be compiled in an incremental configuration.
          Ignores the configured batch size and window length.)
         '''
@@ -666,30 +667,62 @@ class Rater(object):
         result = ''.join([n.value for n in best.to_sequence()])
         
         return result # without prefix
-
-    # todo: generalise from linear/hierarchical sequence of alternatives to actual lattice
-    #       (currently we expect a list of
-    #            pairs of PAGE element, i.e. TextRegion/TextLine/Word/Glyph reference,
-    #                 and PAGE text readings, i.e. list of TextEquiv references,
-    #        and are expected to return a list of
-    #            tuples of PAGE element
-    #                  and best TextEquiv reference
-    #                  and its probability, i.e. average of its characters)
-    #       max_length: guaranteed boundary on string length of readings
-    #       beam_width: number of hypotheses (histories) to keep between elements
-    #       beam_clustering_dist: maximum distance between HL state vectors to form a cluster for pruning
-    def rate_best(self, text, context=None, max_length=500, beam_width=100, beam_clustering_dist=0):
+    
+    def rate_best(self, graph, start_node, end_node, context=None, lm_weight=0.5, max_length=500, beam_width=100, beam_clustering_dist=0):
         '''Rate a lattice of string alternatives, decoding the best-scoring path.
+        
+        The lattice `graph` must be a networkx.DiGraph instance (i.e. a unigraph)
+        with the following edge attributes:
+        - `element`: reference to be kept in the result,
+          should have an `id` property for debugging
+          (e.g. a TextRegionType, TextLineType, WordType or GlyphType)
+        - `alternatives`: list of string alternatives, represented
+          as objects with the properties `Unicode` and a `conf`
+          (e.g. ocrd_page_generateds.TextEquivType)
+        Start with `start_node`, and ensure that `end_node` is its frontier.
+        
+        Parameters:
+        - `lm_weight`: share for language model in the linear combination
+          of log probability scores for language model and previous confidence
+        - `max_length`: guaranteed boundary on string length of readings
+        - `beam_width`: number of hypotheses (histories) to keep between elements
+        - `beam_clustering_dist`: maximum distance between HL state vectors 
+          to form a cluster for pruning
+        
+        Search for the best path through the graph and its edge string alternatives,
+        regarding both previous confidence values in the graph's edges and LM scores
+        calculated for the respective path through the graph. Prune paths to avoid
+        expanding all possible combinations.
+        
+        Return the single-best path as a list of tuples of:
+        - the element reference of the edge (unchanged),
+        - the best alternative object (unchanged),
+        - the new score calculated locally.
         '''
+        import networkx as nx
+        
         # initial state; todo: pass from previous page
-        next_fringe = [Node(state=None, value='\n', cost=0.0)]
-        for element, textequivs in text:
-            self.logger.debug("Rating '%s', combining %d new inputs with %d existing paths",
-                              element.id if element else "space", len(textequivs), len(next_fringe))
-            fringe, next_fringe = next_fringe, []
+        graph.nodes[start_node]['traceback'] = [Node(state=None, value='\n', cost=0.0)]
+        out = 0
+        for in_, out in nx.bfs_edges(graph, start_node): # breadth-first search
+            edge = graph.edges[in_, out]
+            element = edge['element']
+            textequivs = edge['alternatives']
+            in_node = graph.nodes[in_]
+            out_node = graph.nodes[out]
+            # make sure we have already been at in_node
+            assert 'traceback' in in_node, "breadth-first search should have visited %d first in '%s'" % (in_, element.id)
+            fringe = in_node['traceback']
+            next_fringe = out_node['traceback'] if 'traceback' in out_node else []
+            self.logger.debug("Rating '%s', combining %d new inputs with %d existing paths, competing with %d existing paths",
+                              element.id if element else "space", len(textequivs), len(fringe), len(next_fringe))
             for node in fringe:
-                # make a copy of parent node for each textequiv alternative (keeping value+state until prediction)
-                new_nodes = [Node(parent=node, state=node.state, value=node.value, cost=0.0, extras=(element, textequiv)) for textequiv in textequivs]
+                # make a copy of parent node for each textequiv alternative
+                new_nodes = [Node(parent=node,
+                                  state=node.state, # changes during character-wise prediction
+                                  value=node.value, # changes during character-wise prediction
+                                  cost=-log(max(textequiv.conf, 1e-99), 2) * (1. - lm_weight),
+                                  extras=(element, textequiv)) for textequiv in textequivs]
                 strings_ = [textequiv.Unicode for textequiv in textequivs] # alternative character sequences
                 # advance states and accumulate costs of all alternatives (of different length) in parallel
                 for position in range(max_length):
@@ -710,15 +743,19 @@ class Rater(object):
                             idx = self.mapping[0][char]
                         new_node.value = char
                         new_node.state = states[alternative]
-                        new_node.cum_cost += -log(max(preds[alternative][idx], 1e-99), 2)
-                for new_node in new_nodes:
+                        new_node.cum_cost += -log(max(preds[alternative][idx], 1e-99), 2) * lm_weight
+                for new_node, string_ in zip(new_nodes, strings_):
+                    new_node.value = string_ # not just last char
                     if beam_clustering_dist and self._history_clustering(new_node, next_fringe, beam_clustering_dist):
                         continue
-                    insort_left(next_fringe, new_node) # insert sorted by cumulative costs
-                    # todo: incorporate input confidences, too (weighted product or as input into LM)
+                    insort_left(next_fringe, new_node) # insert sorted by (unnormalised) cumulative costs
             #self.logger.debug("Shrinking %d paths to best %d", len(next_fringe), beam_width)
-            next_fringe = next_fringe[:beam_width] # keep best paths
-        best = next_fringe[0] # best-scoring path
+            # todo: use some variable length beam threshold
+            next_fringe = next_fringe[:beam_width] # keep best paths (cardinality pruning)
+            out_node['traceback'] = next_fringe
+        assert out == end_node, 'breadth-first search failed to reach true end node (%d instead of %d)' % (out, end_node)
+        assert 'traceback' in out_node, "breadth-first search failed to reach end node with any result"
+        best = out_node['traceback'][0] # best-scoring path
         result = []
         for node in best.to_sequence()[1:]: # ignore root node
             element, textequiv = node.extras
@@ -727,10 +764,9 @@ class Rater(object):
             result.append((element, textequiv, score))
         return result, best.cum_cost
     
-    #def rate_all(self, lattice):
+    #def rate_all(self, graph, start_node, end_node, push_forward_k=1):
     #    '''Rate a lattice of string alternatives, rescoring all edges.'''
     
-    # todo: history clustering for pruning paths by joining similar nodes (instead of neglecting costly nodes)
     def _history_clustering(self, new_node, next_fringe, distance=5):
         '''Determine whether a node may enter the beam, or has redundant history.
         

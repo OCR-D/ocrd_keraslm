@@ -7,6 +7,8 @@ from ocrd.utils import getLogger, concat_padded, xywh_from_points, points_from_x
 from ocrd.model.ocrd_page import from_file, to_xml, GlyphType, CoordsType, TextEquivType
 from ocrd.model.ocrd_page_generateds import MetadataItemType, LabelsType, LabelType
 
+import networkx as nx
+
 from ocrd_keraslm.wrapper.config import OCRD_TOOL
 from ocrd_keraslm import lib
 
@@ -72,7 +74,10 @@ class KerasRate(Processor):
                     year = ceil(int(year)/10)
                     context = [year]
                     # todo: author etc
-            text = []
+            # create a graph from the linear sequence of elements at the given level
+            graph = nx.DiGraph(level=level) # initialise directed unigraph with global attribute level
+            graph.add_node(0)
+            start_node = 0
             # white space IFF between words, newline IFF between lines/regions: required for LM input
             # as a minor mitigation, try to guess consistency a text annotation on multiple levels
             # (i.e. infer wrong tokenisation when mother node has TextEquiv deviating from
@@ -91,20 +96,25 @@ class KerasRate(Processor):
             regions = pcgts.get_Page().get_TextRegion()
             if not regions:
                 LOG.warning("Page contains no text regions")
+            page_start_node = start_node
             first_region = True
             for region in regions:
                 if level == 'region':
+                    graph.add_node(start_node + 1)
                     LOG.debug("Getting text in region '%s'", region.id)
                     textequivs = region.get_TextEquiv()
                     # fixme: this won't happen as long as ocrd.validator.page_validator
                     #        does not use the pcgts id (as there is no page.id)!
-                    if textequivs and repair_tokenisation(problems, pcgts.get_pcGtsId(), text, textequivs[0].Unicode, first_region):
+                    if textequivs and repair_tokenisation(problems, pcgts.get_pcGtsId(), graph, 0, textequivs[0].Unicode, first_region):
                         # likely cases: no newlines, or line feed
                         pass # skip all rules for concatenation joints
                     elif not first_region:
-                        text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                        graph.add_edge(start_node, start_node + 1, element=None, alternatives=[TextEquivType(Unicode=u'\n', conf=1.0)]) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                        start_node += 1
+                        graph.add_node(start_node + 1)
                     if textequivs:
-                        text.append((region, filter_choices(textequivs)))
+                        graph.add_edge(start_node, start_node + 1, element=region, alternatives=filter_choices(textequivs))
+                        start_node += 1
                     else:
                         LOG.warning("Region '%s' contains no text results", region.id)
                     first_region = False
@@ -112,18 +122,23 @@ class KerasRate(Processor):
                 lines = region.get_TextLine()
                 if not lines:
                     LOG.warning("Region '%s' contains no text lines", region.id)
+                region_start_node = start_node
                 first_line = True
                 for line in lines:
                     if level == 'line':
+                        graph.add_node(start_node + 1)
                         LOG.debug("Getting text in line '%s'", line.id)
                         textequivs = line.get_TextEquiv()
-                        if textequivs and repair_tokenisation(problems, region.id, text, textequivs[0].Unicode, first_line):
+                        if textequivs and repair_tokenisation(problems, region.id, graph, region_start_node, textequivs[0].Unicode, first_line):
                             # likely cases: extra trailing newlines, or carriage-return
                             pass # skip all rules for concatenation joints
                         elif not first_line or not first_region:
-                            text.append((None, [TextEquivType(Unicode=u'\n')])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                            graph.add_edge(start_node, start_node + 1, element=None, alternatives=[TextEquivType(Unicode=u'\n', conf=1.0)]) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                            start_node += 1
+                            graph.add_node(start_node + 1)
                         if textequivs:
-                            text.append((line, filter_choices(textequivs)))
+                            graph.add_edge(start_node, start_node + 1, element=line, alternatives=filter_choices(textequivs))
+                            start_node += 1
                         else:
                             LOG.warning("Line '%s' contains no text results", line.id)
                         first_line = False
@@ -131,11 +146,12 @@ class KerasRate(Processor):
                     words = line.get_Word()
                     if not words:
                         LOG.warning("Line '%s' contains no words", line.id)
+                    line_start_node = start_node
                     first_word = True
                     for word in words:
                         space_char = None
                         textequivs = word.get_TextEquiv()
-                        if textequivs and repair_tokenisation(problems, line.id, text, textequivs[0].Unicode, first_word):
+                        if textequivs and repair_tokenisation(problems, line.id, graph, line_start_node, textequivs[0].Unicode, first_word):
                             # likely cases: no spaces
                             pass # skip all rules for concatenation joints
                         elif not first_word:
@@ -143,11 +159,15 @@ class KerasRate(Processor):
                         elif not first_line or not first_region:
                             space_char = u'\n'
                         if space_char: # space required for LM input
-                            text.append((None, [TextEquivType(Unicode=space_char)])) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                            graph.add_node(start_node + 1)
+                            graph.add_edge(start_node, start_node + 1, element=None, alternatives=[TextEquivType(Unicode=space_char, conf=1.0)]) # LM output will not appear in annotation (conf cannot be combined to accurate perplexity from output)
+                            start_node += 1
                         if level == 'word':
+                            graph.add_node(start_node + 1)
                             LOG.debug("Getting text in word '%s'", word.id)
                             if textequivs:
-                                text.append((word, filter_choices(textequivs)))
+                                graph.add_edge(start_node, start_node + 1, element=word, alternatives=filter_choices(textequivs))
+                                start_node += 1
                             else:
                                 LOG.warning("Word '%s' contains no text results", word.id)
                             first_word = False
@@ -156,20 +176,25 @@ class KerasRate(Processor):
                         if not glyphs:
                             LOG.warning("Word '%s' contains no glyphs", word.id)
                         for glyph in glyphs:
+                            graph.add_node(start_node + 1)
                             LOG.debug("Getting text in glyph '%s'", glyph.id)
                             textequivs = glyph.get_TextEquiv()
                             if textequivs:
-                                text.append((glyph, filter_choices(textequivs)))
+                                graph.add_edge(start_node, start_node + 1, element=glyph, alternatives=filter_choices(textequivs))
+                                start_node += 1
                             else:
                                 LOG.warning("Glyph '%s' contains no text results", glyph.id)
                         first_word = False
                     first_line = False
                 first_region = False
-            # apply language model to (TextEquiv path in) sequence of elements,
+            # apply language model to (TextEquiv path in) graph,
             # remove non-path TextEquivs, modify confidences:
+            pathlen = start_node - page_start_node
             if self.parameter['alternative_decoding']:
-                LOG.info("Rating %d elements including its alternatives", len(text))
-                path, entropy = self.rater.rate_best(text, context,
+                LOG.info("Rating %d elements including its alternatives", pathlen)
+                path, entropy = self.rater.rate_best(graph, page_start_node, start_node,
+                                                     context=context,
+                                                     lm_weight=1.0, # no influence of input confidence
                                                      max_length=MAX_LENGTH,
                                                      beam_width=beam_width,
                                                      beam_clustering_dist=BEAM_CLUSTERING_DIST if BEAM_CLUSTERING_ENABLE else 0)
@@ -187,9 +212,10 @@ class KerasRate(Processor):
                 ent = entropy/strlen
                 avg = pow(2.0, -ent)
                 ppl = pow(2.0, ent) # character level
-                ppll = pow(2.0, ent * strlen/len(path)) # textequiv level (including spaces/newlines)
+                ppll = pow(2.0, ent * strlen/pathlen) # textequiv level (including spaces/newlines)
                 LOG.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
             else:
+                text = [(graph.edges[in_, out]['element'], graph.edges[in_, out]['alternatives']) for in_, out in nx.bfs_edges(graph, 0)] # graph's path
                 textstring = u''.join(textequivs[0].Unicode for element, textequivs in text) # same length as text
                 LOG.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
                 confidences = self.rater.rate(textstring, context) # much faster
@@ -247,7 +273,7 @@ def filter_choices(textequivs):
     else:
         return []
 
-def repair_tokenisation(tokenisation_problems, identifier, running_hypothesis, next_token, first):
+def repair_tokenisation(tokenisation_problems, identifier, running_hypothesis, start_node, next_token, first):
     # tokenisation inconsistency does not apply if:
     # - element id not contained in detected problem set
     # - there is no TextEquiv to compare with at the next token
@@ -255,7 +281,7 @@ def repair_tokenisation(tokenisation_problems, identifier, running_hypothesis, n
     if identifier in tokenisation_problems and next_token and not first: 
         # invariant: text should contain a representation that concatenates into actual tokenisation
         tokenisation = tokenisation_problems[identifier].actual
-        concatenation = u''.join(map(lambda x: x[1][0].Unicode, running_hypothesis))
+        concatenation = u''.join(map(lambda x: running_hypothesis.edges[x[0], x[1]]['alternatives'][0].Unicode, nx.bfs_edges(running_hypothesis, start_node)))
         # ideally, both overlap (concatenation~tokenisation)
         i = 0
         for i in range(min(len(tokenisation), len(concatenation)), -1, -1):

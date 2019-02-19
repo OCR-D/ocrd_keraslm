@@ -4,3 +4,4 @@ keras
 numpy
 tensorflow
 h5py
+networkx

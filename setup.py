@@ -27,6 +27,7 @@ setup(
         'numpy',
         'tensorflow',
         'h5py',
+        'networkx',
     ],
     extras_require={
         'plotting': [
