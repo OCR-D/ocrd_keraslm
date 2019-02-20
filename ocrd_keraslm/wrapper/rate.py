@@ -121,7 +121,8 @@ class KerasRate(Processor):
                         element.set_TextEquiv([textequiv]) # delete others
                     textequiv_len = len(textequiv.Unicode)
                     conf = sum(confidences[i:i+textequiv_len])/textequiv_len # mean probability
-                    textequiv.set_conf(conf * lm_weight + textequiv.get_conf() * (1. - lm_weight))
+                    conf2 = textequiv.get_conf() or 1.0
+                    textequiv.set_conf(conf * lm_weight + conf2 * (1. - lm_weight))
                     i += textequiv_len
                 if i != len(confidences):
                     LOG.critical("Input text length and output scores length are off by %d characters", i-len(confidences))
