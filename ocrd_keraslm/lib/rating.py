@@ -587,7 +587,8 @@ class Rater(object):
         for i, initial_state in enumerate(initial_states):
             if not initial_state:
                 initial_states[i] = [np.zeros((self.width), dtype=np.float) for n in range(0, self.depth*2)] # h+c per layer
-        states_inputs = [np.vstack([initial_state[layer] for initial_state in initial_states]) for layer in range(0, self.depth*2)] # stack layers across batch (h+c per layer)
+        states_inputs = [np.vstack([initial_state[layer] for initial_state in initial_states])
+                         for layer in range(0, self.depth*2)] # stack layers across batch (h+c per layer)
         
         outputs = self.model.predict_on_batch([x] + zs + states_inputs)
         probs_outputs = outputs[0]
@@ -654,7 +655,7 @@ class Rater(object):
             for j, n in enumerate(fringe): # iterate over batch
                 pred = preds[j]
                 pred_best = np.argsort(pred)[-10:] # keep only 10-best alternatives
-                pred_best = pred_best[np.searchsorted(pred[pred_best], 0.004):] # keep only alternatives better than 1/256 (uniform distribution)
+                pred_best = pred_best[np.searchsorted(pred[pred_best], 0.004):] # keep by absolute threshold
                 costs = -np.log(pred[pred_best])
                 state = states[j]
                 for best, cost in zip(pred_best, costs): # follow up on best predictions
@@ -668,7 +669,8 @@ class Rater(object):
         
         return result # without prefix
     
-    def rate_best(self, graph, start_node, end_node, context=None, lm_weight=0.5, max_length=500, beam_width=100, beam_clustering_dist=0):
+    def rate_best(self, graph, start_node, end_node, context=None, lm_weight=0.5,
+                  max_length=500, beam_width=100, beam_clustering_dist=0):
         '''Rate a lattice of string alternatives, decoding the best-scoring path.
         
         The lattice `graph` must be a networkx.DiGraph instance (i.e. a unigraph)
@@ -686,7 +688,7 @@ class Rater(object):
           of log probability scores for language model and previous confidence
         - `max_length`: guaranteed boundary on string length of readings
         - `beam_width`: number of hypotheses (histories) to keep between elements
-        - `beam_clustering_dist`: maximum distance between HL state vectors 
+        - `beam_clustering_dist`: maximum distance between HL state vectors
           to form a cluster for pruning
         
         Search for the best path through the graph and its edge string alternatives,
@@ -721,29 +723,35 @@ class Rater(object):
                 new_nodes = [Node(parent=node,
                                   state=node.state, # changes during character-wise prediction
                                   value=node.value, # changes during character-wise prediction
-                                  cost=-log(max(textequiv.conf, 1e-99), 2) * (1. - lm_weight),
+                                  cost=0.0,         # accumulates during character-wise prediction
                                   extras=(element, textequiv)) for textequiv in textequivs]
                 strings_ = [textequiv.Unicode for textequiv in textequivs] # alternative character sequences
-                # advance states and accumulate costs of all alternatives (of different length) in parallel
+                confidences = [textequiv.conf for textequiv in textequivs] # alternative probabilities
+                # advance states and accumulate costs of all alternatives/strings_ (of different length) in parallel:
                 for position in range(max_length):
-                    # predict strings_ at current position
-                    updates = [j for j in range(len(textequivs)) if position < len(strings_[j])] # indices to update (next batch)
+                    # indices to update (next batch):
+                    updates = [j for j in range(len(textequivs)) if position < len(strings_[j])]
                     if updates == []:
                         break # no characters left for any textequiv alternative
                     preds, states = self.predict([new_nodes[j].value for j in updates],
                                                  [new_nodes[j].state for j in updates],
                                                  context)
-                    for alternative, (new_node, string_) in enumerate([(new_nodes[j], strings_[j]) for j in updates]):
+                    for alternative, update in enumerate(updates):
+                        new_node = new_nodes[update]
+                        string_ = strings_[update]
+                        conf = confidences[update]
                         char = string_[position]
                         if char not in self.mapping[0]:
                             if not next_fringe: # avoid repeating the input error for all current candidates
-                                self.logger.error('unmapped character "%s" at input alternative %d of element %s', char, textequivs[updates[alternative]].index, element.id)
+                                self.logger.error('unmapped character "%s" at input alternative %d of element %s',
+                                                  char, textequivs[updates[alternative]].index, element.id)
                             idx = 0
                         else:
                             idx = self.mapping[0][char]
                         new_node.value = char
                         new_node.state = states[alternative]
-                        new_node.cum_cost += -log(max(preds[alternative][idx], 1e-99), 2) * lm_weight
+                        new_node.cum_cost += -log(max(preds[alternative][idx], 1e-99), 2) * lm_weight # averaged afterwards/below
+                        new_node.cum_cost += -log(max(conf, 1e-99), 2) * (1. - lm_weight) # repeat length times (because of average)
                 for new_node, string_ in zip(new_nodes, strings_):
                     new_node.value = string_ # not just last char
                     if beam_clustering_dist and self._history_clustering(new_node, next_fringe, beam_clustering_dist):
@@ -778,12 +786,13 @@ class Rater(object):
         then remove it from `next_fringe` right away. Otherwise, return True
         (preventing `new_node` from being inserted).
         
-        If no such hypothesis exists, then return False (allowing `new_node` to be
-        inserted).
+        If no such hypothesis exists, then return False (allowing `new_node`
+        to be inserted).
         '''
         for old_node in next_fringe:
             if (new_node.value == old_node.value and
-                all(np.linalg.norm(new_node.state[layer]-old_node.state[layer]) < distance for layer in range(self.depth))):
+                all(np.linalg.norm(new_node.state[layer] - old_node.state[layer]) < distance
+                    for layer in range(self.depth))):
                 if old_node.cum_cost < new_node.cum_cost:
                     # self.logger.debug("discarding %s in favour of %s due to history clustering",
                     #                   ''.join([prev_node.extras[1].Unicode for prev_node in new_node.to_sequence()[1:]]),
@@ -813,7 +822,8 @@ class Rater(object):
             group.create_dataset('length', data=np.array(self.length))
             group.create_dataset('stateful', data=np.array(self.stateful))
             group.create_dataset('variable_length', data=np.array(self.variable_length))
-            group.create_dataset('mapping', data=np.fromiter((ord(self.mapping[1][i]) if i in self.mapping[1] else 0 for i in range(self.voc_size)), dtype='uint32'))
+            group.create_dataset('mapping', data=np.fromiter((ord(self.mapping[1][i]) if i in self.mapping[1] else 0
+                                                              for i in range(self.voc_size)), dtype='uint32'))
     
     def load_config(self, filename):
         '''Load parameters to prepare configuration/compilation.
@@ -941,10 +951,12 @@ class Rater(object):
                         rand_max = 0.1 # effective subsampling ratio
                         if rand < rand_max:
                             j = int((self.length-1) * rand / rand_max) + 1 # random length
-                            # erase complete batch by sublength from the left to simulate running in with zero padding as in rate():
+                            # erase complete batch by sublength from the left ...
+                            # to simulate running in with zero padding as in rate():
                             # x[0][:, 0:j] = 0
                             # yield (x, y)
-                            # shorten complete batch to sublength from the right to simulate running in with short sequences in rate():
+                            # shorten complete batch to sublength from the right ...
+                            # to simulate running in with short sequences in rate():
                             yield [z[:, -j:] for z in x], y
                         rand = (rand - rand_max) / (1 - rand_max) # re-use rest of random number
                 yield x, y
@@ -1014,7 +1026,8 @@ class Rater(object):
             print('%d: "%s"' % (i, c))
             char = unicodedata.normalize('NFC', c)
             if c != char:
-                self.logger.warning('mapped character "%s" (%d) should have been normalized to "%s", which is %s mapped', c, i, char, 'also' if char in self.mapping[0] else 'not')
+                self.logger.warning('mapped character "%s" (%d) should have been normalized to "%s", which is %s mapped',
+                                    c, i, char, 'also' if char in self.mapping[0] else 'not')
     
     def plot_char_embeddings_similarity(self, filename):
         '''Paint a heat map of character embeddings.

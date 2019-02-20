@@ -50,6 +50,7 @@ class KerasRate(Processor):
         """
         level = self.parameter['textequiv_level']
         beam_width = self.parameter['beam_width']
+        lm_weight = self.parameter['lm_weight']
         for (n, input_file) in enumerate(self.input_files):
             LOG.info("INPUT FILE %i / %s", n, input_file)
             pcgts = from_file(self.workspace.download_file(input_file))
@@ -88,7 +89,7 @@ class KerasRate(Processor):
                 LOG.info("Rating %d elements including its alternatives", end_node - start_node)
                 path, entropy = self.rater.rate_best(graph, start_node, end_node,
                                                      context=context,
-                                                     lm_weight=1.0, # no influence of input confidence
+                                                     lm_weight=lm_weight,
                                                      max_length=MAX_LENGTH,
                                                      beam_width=beam_width,
                                                      beam_clustering_dist=BEAM_CLUSTERING_DIST if BEAM_CLUSTERING_ENABLE else 0)
@@ -120,7 +121,7 @@ class KerasRate(Processor):
                         element.set_TextEquiv([textequiv]) # delete others
                     textequiv_len = len(textequiv.Unicode)
                     conf = sum(confidences[i:i+textequiv_len])/textequiv_len # mean probability
-                    textequiv.set_conf(conf) # todo: incorporate input confidences, too (weighted product or as input into LM)
+                    textequiv.set_conf(conf * lm_weight + textequiv.get_conf() * (1. - lm_weight))
                     i += textequiv_len
                 if i != len(confidences):
                     LOG.critical("Input text length and output scores length are off by %d characters", i-len(confidences))
@@ -160,7 +161,7 @@ def page_get_linear_graph_at(level, pcgts):
             textequivs = region.get_TextEquiv()
             if not first_region:
                 start_node = _add_space(graph, start_node, '\n',
-                                        page_start_node, problems.get(pcgts.get_pcGtsId()), 
+                                        page_start_node, problems.get(pcgts.get_pcGtsId()),
                                         textequivs)
             if textequivs:
                 start_node = _add_element(graph, start_node, region, textequivs)
@@ -179,7 +180,7 @@ def page_get_linear_graph_at(level, pcgts):
                 textequivs = line.get_TextEquiv()
                 if not first_line or not first_region:
                     start_node = _add_space(graph, start_node, '\n',
-                                            region_start_node, not first_line and problems.get(region.id), 
+                                            region_start_node, not first_line and problems.get(region.id),
                                             textequivs)
                 if textequivs:
                     start_node = _add_element(graph, start_node, line, textequivs)
@@ -196,7 +197,7 @@ def page_get_linear_graph_at(level, pcgts):
                 textequivs = word.get_TextEquiv()
                 if not first_word or not first_line or not first_region:
                     start_node = _add_space(graph, start_node, '\n' if first_word else ' ',
-                                            line_start_node, not first_word and problems.get(line.id), 
+                                            line_start_node, not first_word and problems.get(line.id),
                                             textequivs)
                 if level == 'word':
                     LOG.debug("Getting text in word '%s'", word.id)
@@ -224,7 +225,7 @@ def page_get_linear_graph_at(level, pcgts):
 def page_update_higher_textequiv_levels(level, pcgts):
     '''Update the TextEquivs of all PAGE-XML hierarchy levels above `level` for consistency.
     
-    Starting with the hierarchy level chosen for processing, 
+    Starting with the hierarchy level chosen for processing,
     join all first TextEquiv (by the rules governing the respective level)
     into TextEquiv of the next higher level, replacing them.
     '''
@@ -265,21 +266,21 @@ def _page_get_tokenisation_problems(level, pcgts):
 
 def _add_element(graph, start_node, element, textequivs):
     graph.add_node(start_node + 1)
-    graph.add_edge(start_node, start_node + 1, 
-                   element=element, 
+    graph.add_edge(start_node, start_node + 1,
+                   element=element,
                    alternatives=_filter_choices(textequivs))
     return start_node + 1
 
 def _add_space(graph, start_node, space, last_start_node, problem, textequivs):
     """add a pseudo-element edge for the white-space string `space` to `graph`,
-    between `start_node` and new node `start_node`+1, except if there is a 
+    between `start_node` and new node `start_node`+1, except if there is a
     tokenisation `problem` involving the first textequiv in the graph's current tip"""
     # tokenisation inconsistency does not apply if:
     # - element id not contained in detected problem set
     # - there is no TextEquiv to compare with at the next token
     # - the element is first of its kind (i.e. must not start with white space anyway)
     if (textequivs and textequivs[0].Unicode and problem and
-        _repair_tokenisation(problem.actual, 
+        _repair_tokenisation(problem.actual,
                              u''.join(map(lambda x: x['alternatives'][0].Unicode, _get_edges(graph, last_start_node))),
                              textequivs[0].Unicode)):
         pass # skip all rules for concatenation joins
@@ -315,4 +316,3 @@ def _filter_choices(textequivs):
             return textequivs
     else:
         return []
-

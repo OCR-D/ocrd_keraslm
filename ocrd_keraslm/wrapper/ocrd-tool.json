@@ -48,6 +48,12 @@
           "format": "integer",
           "description": "maximum number of best partial paths to consider during search with alternative_decoding",
           "default": 100
+        },
+        "lm_weight": {
+          "type": "number",
+          "format": "float",
+          "description": "share of the LM scores over the input confidences",
+          "default": 0.5
         }
       }
     }

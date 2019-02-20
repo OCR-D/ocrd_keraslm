@@ -69,7 +69,7 @@ def train(model, width, depth, length, val_data, data):
 @cli.command(short_help='get individual probabilities from language model')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 @click.option('-c', '--context', default=None, help='constant meta-data input')
-@click.argument('text', type=click.STRING) # todo: create custom click.ParamType for graph/FST input
+@click.argument('text', type=click.STRING)
 def apply(model, text, context):
     """Apply a language model to TEXT string and compute its individual probabilities.
 
