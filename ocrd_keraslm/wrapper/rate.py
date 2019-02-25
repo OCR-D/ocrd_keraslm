@@ -45,12 +45,16 @@ class KerasRate(Processor):
         self.rater.load_weights(self.parameter['model_file'])
     
     def process(self):
-        """
-        Rates textual annotation of PAGE input files, producing output files with LM scores (and choices).
+        """Rates textual annotation of PAGE input files, producing output files with LM scores (and choices).
+        
+        ... explain incremental page-wise processing here ...
         """
         level = self.parameter['textequiv_level']
         beam_width = self.parameter['beam_width']
         lm_weight = self.parameter['lm_weight']
+
+        prev_traceback = None
+        prev_pcgts = None
         for (n, input_file) in enumerate(self.input_files):
             LOG.info("INPUT FILE %i / %s", n, input_file)
             pcgts = from_file(self.workspace.download_file(input_file))
@@ -85,31 +89,7 @@ class KerasRate(Processor):
             
             # apply language model to (TextEquiv path in) graph,
             # remove non-path TextEquivs, modify confidences:
-            if self.parameter['alternative_decoding']:
-                LOG.info("Rating %d elements including its alternatives", end_node - start_node)
-                path, entropy = self.rater.rate_best(graph, start_node, end_node,
-                                                     context=context,
-                                                     lm_weight=lm_weight,
-                                                     max_length=MAX_LENGTH,
-                                                     beam_width=beam_width,
-                                                     beam_clustering_dist=BEAM_CLUSTERING_DIST if BEAM_CLUSTERING_ENABLE else 0)
-                strlen = 0
-                for element, textequiv, score in path:
-                    if element: # not just space
-                        element.set_TextEquiv([textequiv]) # delete others
-                        strlen += len(textequiv.Unicode)
-                        textequiv.set_conf(score)
-                        #print(textequiv.Unicode, end='')
-                    else:
-                        strlen += 1
-                        #print(''.join([node.value]), end='')
-                #print('')
-                ent = entropy/strlen
-                avg = pow(2.0, -ent)
-                ppl = pow(2.0, ent) # character level
-                ppll = pow(2.0, ent * strlen/(end_node - start_node)) # textequiv level (including spaces/newlines)
-                LOG.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
-            else:
+            if not self.parameter['alternative_decoding']:
                 text = [(edge['element'], edge['alternatives']) for edge in _get_edges(graph, 0)] # graph's path
                 textstring = u''.join(textequivs[0].Unicode for element, textequivs in text) # same length as text
                 LOG.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
@@ -131,10 +111,56 @@ class KerasRate(Processor):
                 ppl = pow(2.0, ent) # character level
                 ppll = pow(2.0, ent * len(confidences)/len(text)) # textequiv level (including spaces/newlines)
                 LOG.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
+                
+                # ensure parent textequivs are up to date:
+                page_update_higher_textequiv_levels(level, pcgts)
+            
+                # write back result
+                file_id = concat_padded(self.output_file_grp, n)
+                self.workspace.add_file(
+                    ID=file_id,
+                    file_grp=self.output_file_grp,
+                    basename=file_id + '.xml', # with suffix or bare?
+                    mimetype=MIMETYPE_PAGE,
+                    content=to_xml(pcgts),
+                )
+            else:
+                LOG.info("Rating %d elements including its alternatives", end_node - start_node)
+                path, entropy, traceback = self.rater.rate_best(
+                    graph, start_node, end_node,
+                    start_traceback=prev_traceback,
+                    context=context,
+                    lm_weight=lm_weight,
+                    max_length=MAX_LENGTH,
+                    beam_width=beam_width,
+                    beam_clustering_dist=BEAM_CLUSTERING_DIST if BEAM_CLUSTERING_ENABLE else 0)
+
+                if prev_pcgts:
+                    _page_update_from_path(level, path, entropy)
+                    
+                    # ensure parent textequivs are up to date:
+                    page_update_higher_textequiv_levels(level, prev_pcgts)
+
+                    # write back result
+                    file_id = concat_padded(self.output_file_grp, n - 1)
+                    self.workspace.add_file(
+                        ID=file_id,
+                        file_grp=self.output_file_grp,
+                        basename=file_id + '.xml', # with suffix or bare?
+                        mimetype=MIMETYPE_PAGE,
+                        content=to_xml(prev_pcgts),
+                    )
+                
+                prev_pcgts = pcgts
+                prev_traceback = traceback
+        
+        if prev_pcgts:
+            path, entropy, _ = self.rater.next_path(prev_traceback, [])
+            _page_update_from_path(level, path, entropy)
             
             # ensure parent textequivs are up to date:
-            page_update_higher_textequiv_levels(level, pcgts)
-            
+            page_update_higher_textequiv_levels(level, prev_pcgts)
+
             # write back result
             file_id = concat_padded(self.output_file_grp, n)
             self.workspace.add_file(
@@ -142,7 +168,7 @@ class KerasRate(Processor):
                 file_grp=self.output_file_grp,
                 basename=file_id + '.xml', # with suffix or bare?
                 mimetype=MIMETYPE_PAGE,
-                content=to_xml(pcgts),
+                content=to_xml(prev_pcgts),
             )
 
 def page_get_linear_graph_at(level, pcgts):
@@ -222,6 +248,21 @@ def page_get_linear_graph_at(level, pcgts):
             first_line = False
         first_region = False
     return graph, page_start_node, start_node
+
+def _page_update_from_path(level, path, entropy):
+    strlen = 0
+    for element, textequiv, score in path:
+        if element: # not just space
+            element.set_TextEquiv([textequiv]) # delete others
+            strlen += len(textequiv.Unicode)
+            textequiv.set_conf(score)
+        else:
+            strlen += 1
+    ent = entropy/strlen
+    avg = pow(2.0, -ent)
+    ppl = pow(2.0, ent) # character level
+    ppll = pow(2.0, ent * strlen/len(path)) # textequiv level (including spaces/newlines)
+    LOG.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
 
 def page_update_higher_textequiv_levels(level, pcgts):
     '''Update the TextEquivs of all PAGE-XML hierarchy levels above `level` for consistency.

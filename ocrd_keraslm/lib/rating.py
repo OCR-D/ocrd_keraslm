@@ -668,10 +668,13 @@ class Rater(object):
         result = ''.join([n.value for n in best.to_sequence()])
         
         return result # without prefix
-    
-    def rate_best(self, graph, start_node, end_node, context=None, lm_weight=0.5,
+
+    # todo: make independent of Rater
+    def rate_best(self, graph, start_node, end_node,
+                  start_traceback=None,
+                  context=None, lm_weight=0.5,
                   max_length=500, beam_width=100, beam_clustering_dist=0):
-        '''Rate a lattice of string alternatives, decoding the best-scoring path.
+        '''Rate a lattice of string alternatives, decoding the best-scoring path, incrementally.
         
         The lattice `graph` must be a networkx.DiGraph instance (i.e. a unigraph)
         with the following edge attributes:
@@ -681,9 +684,24 @@ class Rater(object):
         - `alternatives`: list of string alternatives, represented
           as objects with the properties `Unicode` and a `conf`
           (e.g. ocrd_page_generateds.TextEquivType)
-        Start with `start_node`, and ensure that `end_node` is its frontier.
+        Start with a traceback `start_traceback` at graph node `start_node`,
+        and ensure that `end_node` is its frontier.
         
-        Parameters:
+        Search for the best paths through the graph and its edge string alternatives
+        via beam search (keeping a traceback of LM state history at each node).
+        Regard both previous confidence values in the graph's edges and new LM scores
+        calculated for the respective path through the graph, weighted by `lm_weight`.
+        Prune paths to avoid expanding all possible combinations.
+        
+        At the end of the graph, look into the current best overall path, going back
+        to the last node among `start_traceback`. Lock into that node by removing
+        all current paths that do not derive from it, and making its history path
+        the final decision for the previous graph. Return that path together with
+        the remaining current traceback, all cut at that node (for the next graph).
+        (That is, the returned traceback is always ahead of the returned path
+         by one graph. This could be the last page or the previous line, for example.)
+        
+        Additional parameters:
         - `lm_weight`: share for language model in the linear combination
           of log probability scores for language model and previous confidence
         - `max_length`: guaranteed boundary on string length of readings
@@ -691,20 +709,19 @@ class Rater(object):
         - `beam_clustering_dist`: maximum distance between HL state vectors
           to form a cluster for pruning
         
-        Search for the best path through the graph and its edge string alternatives,
-        regarding both previous confidence values in the graph's edges and LM scores
-        calculated for the respective path through the graph. Prune paths to avoid
-        expanding all possible combinations.
-        
-        Return the single-best path as a list of tuples of:
-        - the element reference of the edge (unchanged),
-        - the best alternative object (unchanged),
-        - the new score calculated locally.
+        Return a list of:
+        - the single-best path of the previous graph as a list of tuples of:
+          - the element reference of the edge (unchanged),
+          - the best alternative object (unchanged),
+          - the new score calculated locally,
+        - the entropy at the end of that path,
+        - the current graph's traceback as a sorted list of Node objects.
         '''
         import networkx as nx
         
-        # initial state; todo: pass from previous page
-        graph.nodes[start_node]['traceback'] = [Node(state=None, value='\n', cost=0.0)]
+        if not start_traceback:
+            start_traceback = [Node(state=None, value='\n', cost=0.0)]
+        graph.nodes[start_node]['traceback'] = start_traceback
         out = 0
         for in_, out in nx.bfs_edges(graph, start_node): # breadth-first search
             edge = graph.edges[in_, out]
@@ -763,14 +780,35 @@ class Rater(object):
             out_node['traceback'] = next_fringe
         assert out == end_node, 'breadth-first search failed to reach true end node (%d instead of %d)' % (out, end_node)
         assert 'traceback' in out_node, "breadth-first search failed to reach end node with any result"
-        best = out_node['traceback'][0] # best-scoring path
+
+        traceback = out_node['traceback']
+        result, entropy, next_traceback = self.next_path(traceback, start_traceback)
+        return result, entropy, next_traceback
+
+    # todo: make independent of Rater
+    def next_path(self, traceback, start_traceback):
+        '''Advance from `start_traceback` to `traceback`.
+        
+        (Last part of `rate_best` with same return values.)
+        '''
+        best = traceback[0] # best-scoring hypothesis so far
+        best_path = best.to_sequence(stop_at=start_traceback) # path before start_traceback
+        start_node = best_path[-1] # Node from start_traceback we stopped at
+        next_traceback = []
+        for node in traceback:
+            other_path = node.to_sequence(stop_at=[start_node])
+            if not other_path: # hypothesis does not derive from chosen path
+                continue
+            node.cut_at(start_node) # remove old part from sequence
+            next_traceback.append(node)
         result = []
-        for node in best.to_sequence()[1:]: # ignore root node
-            element, textequiv = node.extras
-            textequiv_len = len(textequiv.Unicode)
-            score = pow(2.0, -(node.cum_cost-node.parent.cum_cost)/textequiv_len) # average probability
-            result.append((element, textequiv, score))
-        return result, best.cum_cost
+        for node in best_path:
+            if node.extras:
+                element, textequiv = node.extras
+                parent_cost = node.parent.cum_cost if node.parent else 0.
+                score = pow(2.0, -(node.cum_cost - parent_cost) / len(textequiv.Unicode)) # average probability
+                result.append((element, textequiv, score))
+        return result, start_node.cum_cost, next_traceback
     
     #def rate_all(self, graph, start_node, end_node, push_forward_k=1):
     #    '''Rate a lattice of string alternatives, rescoring all edges.'''
@@ -1166,7 +1204,7 @@ class Node(object):
     and 3 content attributes:
     - `value`: byte at that position in the sequence
     - `state`: LM state vectors representing the past sequence
-    - `extras`: node identifier of value (not used yet)
+    - `extras`: node identifier of value
     as well as a score attribute:
     - `cum_cost`: cumulative LM score of sequence after value
     and two convenience attributes:
@@ -1186,15 +1224,36 @@ class Node(object):
         self._sequence = None
         #print('added node', ''.join([n.value for n in self.to_sequence()]))
     
-    def to_sequence(self):
-        """Return a sequence of nodes from root to current node."""
+    def to_sequence(self, stop_at=None):
+        """Return a sequence of nodes from root to current node.
+        
+        If given, `stop_at` identifies nodes at which the sequence
+        should end (minimal parent, inclusive).
+        """
         if not self._sequence:
             self._sequence = []
             current_node = self
+            activated = False if stop_at else True
             while current_node:
-                self._sequence.insert(0, current_node)
+                if stop_at and current_node in stop_at:
+                    activated = True
+                if activated:
+                    self._sequence.insert(0, current_node)
                 current_node = current_node.parent
         return self._sequence
+    
+    def cut_at(self, node):
+        """Cut the sequence of nodes after the given node.
+        
+        Replace `node` as parent by None in the sequence.
+        """
+        current_node = self
+        while current_node:
+            if current_node.parent is node:
+                current_node.parent = None
+                self._sequence = None
+                break
+            current_node = current_node.parent
     
     def __lt__(self, other):
         return self.cum_cost < other.cum_cost

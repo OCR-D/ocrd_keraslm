@@ -5,4 +5,3 @@ Node - tree data type for beam search
 '''
 
 from .rating import Rater, Node
-
