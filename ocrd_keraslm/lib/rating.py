@@ -220,8 +220,8 @@ class Rater(object):
         # make sure only vec0 is affected, i.e. vecs change only via global loss:
         vecs = K.stop_gradient(vecs)
         # scale to make gradients benign:
-        underspecification = K.sum(K.square(0.01 * (vec0 - vecs))) # c='\0' ~ mean of others
-        lowrank = K.sum(K.square(0.01 * embedding_matrix)) # generalization/sparsity
+        underspecification = K.sum(K.square(0.001 * (vec0 - vecs))) # c='\0' ~ mean of others
+        lowrank = K.sum(K.square(0.001 * embedding_matrix)) # generalization/sparsity
         return lowrank + underspecification
     
     def train(self, data, val_data=None):
@@ -794,6 +794,14 @@ class Rater(object):
         best = traceback[0] # best-scoring hypothesis so far
         best_path = best.to_sequence(stop_at=start_traceback) # path before start_traceback
         start_node = best_path[-1] # Node from start_traceback we stopped at
+        end_node = best_path[0] # Node from start_traceback we cut last time
+        result = []
+        for node in best_path:
+            if node.extras:
+                element, textequiv = node.extras
+                parent_cost = node.parent.cum_cost if node.parent else end_node.cum_cost # FIXME: end_node is wrong
+                score = pow(2.0, -(node.cum_cost - parent_cost) / len(textequiv.Unicode)) # average probability
+                result.append((element, textequiv, score))
         next_traceback = []
         for node in traceback:
             other_path = node.to_sequence(stop_at=[start_node])
@@ -801,14 +809,7 @@ class Rater(object):
                 continue
             node.cut_at(start_node) # remove old part from sequence
             next_traceback.append(node)
-        result = []
-        for node in best_path:
-            if node.extras:
-                element, textequiv = node.extras
-                parent_cost = node.parent.cum_cost if node.parent else 0.
-                score = pow(2.0, -(node.cum_cost - parent_cost) / len(textequiv.Unicode)) # average probability
-                result.append((element, textequiv, score))
-        return result, start_node.cum_cost, next_traceback
+        return result, start_node.cum_cost - end_node.cum_cost, next_traceback # FIXME: end_node is wrong
     
     #def rate_all(self, graph, start_node, end_node, push_forward_k=1):
     #    '''Rate a lattice of string alternatives, rescoring all edges.'''
@@ -1084,7 +1085,7 @@ class Rater(object):
         assert self.status == 2
         charlay = self.model.get_layer(name='char_embedding')
         charwgt = charlay.get_weights()[0]
-        charcor = np.tensordot(charwgt, charwgt, (1, 1)) # confusion matrix
+        charcor = np.dot(charwgt, charwgt.T) # confusion matrix
         plt.imsave(filename, np.log(np.abs(charcor)), cmap=cm.gray)
     
     def plot_context_embeddings_similarity(self, filename, n=1):
@@ -1104,7 +1105,7 @@ class Rater(object):
         assert self.status == 2
         ctxtlay = self.model.get_layer(name='context%d_embedding' % n)
         ctxtwgt = ctxtlay.get_weights()[0]
-        ctxtcor = np.tensordot(ctxtwgt, ctxtwgt, (1, 1)) # confusion matrix
+        ctxtcor = np.dot(ctxtwgt, ctxtwgt.T) # confusion matrix
         plt.imsave(filename, np.log(np.abs(ctxtcor)), cmap=cm.gray)
 
     def plot_context_embeddings_projection(self, filename, n=1):
