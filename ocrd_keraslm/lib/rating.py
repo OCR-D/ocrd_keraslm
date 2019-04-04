@@ -1,15 +1,12 @@
 import os
-import codecs
 import unicodedata
 from random import shuffle
 from math import log, exp, ceil
 from bisect import insort_left
-import signal
 import logging
 import click
 import numpy as np
 import h5py
-from keras.callbacks import Callback
 
 class Rater(object):
     '''A character-level RNN language model for rating text.
@@ -254,6 +251,8 @@ class Rater(object):
         for validation instead (regardless of mode).
         '''
         from keras.callbacks import EarlyStopping, TerminateOnNaN
+        from .callbacks import StopSignalCallback, ResetStatesCallback
+        
         # uncomment the following lines to enter tfdbg during training:
         #from keras import backend as K
         #from tensorflow.python import debug as tf_debug
@@ -271,26 +270,30 @@ class Rater(object):
         self.reconfigure_for_mapping()
         
         # fit model
-        callbacks = [EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True),
-                     TerminateOnNaN(),
-                     StopSignalCallback(signal.SIGINT, self.logger)]
+        earlystopping = EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True)
+        callbacks = [earlystopping, TerminateOnNaN(),
+                     StopSignalCallback(logger=self.logger)]
         if self.stateful:
-            self.reset_cb = ResetStatesCallback(self.logger)
+            self.reset_cb = ResetStatesCallback(logger=self.logger)
             callbacks.append(self.reset_cb)
-        history = self.model.fit_generator(self._gen_data_from_files(training_data, steps, split=split, train=True, repeat=True),
-                                 steps_per_epoch=training_epoch_size, epochs=100,
-                                 workers=1, use_multiprocessing=False, # True makes communication with reset callback impossible
-                                 validation_data=self._gen_data_from_files(validation_data, steps, split=split, train=False, repeat=True),
-                                 validation_steps=validation_epoch_size,
-                                 verbose=1, callbacks=callbacks)
+        
+        history = self.model.fit_generator(
+            self._gen_data_from_files(training_data, steps, split=split, train=True, repeat=True),
+            steps_per_epoch=training_epoch_size, epochs=100,
+            workers=1, use_multiprocessing=False, # True makes communication with reset callback impossible
+            validation_data=self._gen_data_from_files(validation_data, steps, split=split, train=False, repeat=True),
+            validation_steps=validation_epoch_size,
+            verbose=1, callbacks=callbacks)
         # set state
-        if np.isnan(history.history['loss'][0]):
-            self.logger.critical('training failed (NaN loss)')
-            self.status = 1
-        else:
-            if 'val_loss' in history.history:
-                self.logger.info('training finished with val_loss %f', min(history.history['val_loss']))
+        if 'val_loss' in history.history:
+            self.logger.info('training finished with val_loss %f', min(history.history['val_loss']))
+            if np.isnan(history.history['loss'][-1]):
+                # recover weights (which TerminateOnNaN prevented EarlyStopping from doing)
+                self.model.set_weights(earlystopping.best_weights)
             self.status = 2
+        else:
+            self.logger.critical('training failed')
+            self.status = 1
     
     def _split_data(self, data, val_data):
         '''Read text files and split into training vs validation, count batches and update char mapping.'''
@@ -459,7 +462,7 @@ class Rater(object):
         steps = self.length if self.stateful else 1
         with click.progressbar(test_data) as pbar:
             for file in pbar:
-                text, size = _read_normalize_file(file)
+                _text, size = _read_normalize_file(file)
                 epoch_size += ceil((size-1)/self.batch_size/steps)
         
         # todo: make iterator thread-safe and then use_multiprocesing=True
@@ -1145,72 +1148,6 @@ class Rater(object):
         plt.plot(ctxtprj[0, 0], ctxtprj[0, 1], 'ro') # red circle (zero)
         plt.savefig(filename)
 
-class StopSignalCallback(Callback):
-    '''Keras callback for graceful interruption of training.
-    
-    Halts training prematurely at the end of the current batch
-    when the given signal was received once. If the callback
-    gets to receive the signal again, exits immediately.
-    '''
-    
-    def __init__(self, sig=signal.SIGINT, logger=None):
-        super(StopSignalCallback, self).__init__()
-        self.received = False
-        self.sig = sig
-        self.logger = logger or logging.getLogger(__name__)
-        def stopper(sig, frame):
-            if sig == self.sig:
-                if self.received: # called again?
-                    self.logger.critical('interrupting')
-                    exit(0)
-                else:
-                    self.logger.critical('stopping training')
-                    self.received = True
-        self.action = signal.signal(self.sig, stopper)
-    
-    def __del__(self):
-        signal.signal(self.sig, self.action)
-    
-    def on_batch_end(self, batch, logs=None):
-        if self.received:
-            self.model.stop_training = True
-
-class ResetStatesCallback(Callback):
-    '''Keras callback for stateful models to reset state between files.
-    
-    Callback to be called by `fit_generator()` or even `evaluate_generator()`:
-    do `model.reset_states()` whenever generator sees EOF (on_batch_begin with self.eof),
-    and between training and validation (on_batch_end with batch>=steps_per_epoch-1).
-    '''
-    def __init__(self, logger=None):
-        super(ResetStatesCallback, self).__init__()
-        self.eof = False
-        self.here = ''
-        self.there = ''
-        self.logger = logger or logging.getLogger(__name__)
-    
-    def reset(self, where):
-        '''Reset the model after the end of the current batch.'''
-        self.eof = True
-        self.there = where
-    
-    def on_batch_begin(self, batch, logs=None):
-        if self.eof:
-            # between training files
-            self.model.reset_states()
-            self.eof = False
-            self.here = self.there
-    
-    def on_batch_end(self, batch, logs=None):
-        if logs.get('loss') > 25:
-            self.logger.warning('huge loss in "%s" at %d', self.here, batch)
-        if np.isnan(logs.get('loss')):
-            self.logger.critical('NaN loss in "%s" at %d', self.here, batch)
-        if (self.params['do_validation'] and batch >= self.params['steps']-1):
-            # in fit_generator just before evaluate_generator
-            self.model.reset_states()
-
-            
 class Node(object):
     '''One node in a tree of textual alternatives for beam search.
     
@@ -1283,8 +1220,8 @@ class Node(object):
     def __ge__(self, other):
         return self.cum_cost >= other.cum_cost
 
-def _read_normalize_file(fd):
-    text = unicodedata.normalize('NFC', fd.read())
+def _read_normalize_file(file):
+    text = unicodedata.normalize('NFC', file.read())
     size = len(text)
     return text, size
     

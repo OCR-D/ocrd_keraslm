@@ -3,7 +3,6 @@ from __future__ import absolute_import
 
 import os
 import sys
-import codecs
 import logging
 from math import ceil
 import json

@@ -1,6 +1,6 @@
 ocrd >= 0.15.2
 click
-keras
+keras >= 2.2.4
 numpy
 tensorflow
 h5py
