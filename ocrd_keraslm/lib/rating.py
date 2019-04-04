@@ -226,7 +226,7 @@ class Rater(object):
         vecs = K.stop_gradient(K.mean(vecs, axis=0))
         # scale to make gradients benign:
         underspecification = 1 * K.sum(K.square(vec0 - vecs)) # c='\0' ~ mean of others
-        
+
         norms = K.sum(K.square(embedding_matrix), axis=1)
         norm0 = K.ones_like(norms) # square of target (non-zero) weight norm
         lowrank = 0.01 * K.sum(K.square(norm0 - norms)) # generalization/sparsity
@@ -690,7 +690,7 @@ class Rater(object):
     def rate_best(self, graph, start_node, end_node,
                   start_traceback=None,
                   context=None, lm_weight=0.5,
-                  max_length=500, beam_width=10, beam_clustering_dist=0):
+                  beam_width=10, beam_clustering_dist=0):
         '''Rate a lattice of string alternatives, decoding the best-scoring path, incrementally.
         
         The lattice `graph` must be a networkx.DiGraph instance (i.e. a unigraph)
@@ -744,85 +744,81 @@ class Rater(object):
             edge = graph.edges[in_, out]
             element = edge['element']
             textequivs = edge['alternatives']
-            strings_ = [textequiv.Unicode for textequiv in textequivs] # alternative character sequences
-            confidences = [textequiv.conf for textequiv in textequivs] # alternative probabilities
             in_node = graph.nodes[in_]
             out_node = graph.nodes[out]
             # make sure we have already been at in_node
             assert 'traceback' in in_node, \
                 "breadth-first search should have visited %d first in '%s'" % (in_, element.id)
             beam = in_node['traceback']
-            next_beam = out_node['traceback'] if 'traceback' in out_node else []
+            final_beam = out_node['traceback'] if 'traceback' in out_node else []
             self.logger.debug("Rating '%s', combining %d new inputs "
                               "with %d existing paths, competing with %d existing paths",
                               element.id if element else "space", len(textequivs),
-                              len(beam), len(next_beam))
-            for alternative in beam:
-                if (len(next_beam) >= beam_width and
-                    alternative >= next_beam[beam_width-1]):
-                    #self.logger.debug("alternative '%s' fell off the beam before combination already",
-                    #                  ''.join([n.value for n in alternative.to_sequence()]))
-                    continue # ignore
-                # make a copy of parent alternative for each textequiv alternative
-                candidates = [Node(parent=alternative,
-                                   state=alternative.state, # changes during character-wise prediction
-                                   value=alternative.value[-1], # changes during character-wise prediction
-                                   cost=0.0,         # accumulates during character-wise prediction
-                                   extras=(element, textequiv))
-                              for textequiv in textequivs]
+                              len(beam), len(final_beam))
+            next_beam = [Node(parent=alternative, # keep sort order, but combine with input alternatives
+                              state=alternative.state, # changes during character-wise prediction
+                              value="",                # changes during character-wise prediction
+                              cost=0.0,                # accumulates during character-wise prediction
+                              extras=(element, textequiv))
+                         for alternative in beam
+                         for textequiv in textequivs]
+            unmapped_seen = dict()
+            max_batches = max(map(lambda x: len(x.Unicode), textequivs)) * 3 # loose upper bound
+            for l in range(max_batches):
+                beam = []
+                while next_beam:
+                    candidate = next_beam.pop()
+                    if candidate.value == candidate.extras[1].Unicode:
+                        if (beam_clustering_dist and
+                            self._history_clustering(candidate, final_beam, beam_clustering_dist)):
+                            continue # ignore this hypothesis
+                        insort_left(final_beam, candidate)
+                    else:
+                        insort_left(beam, candidate)
+                    if len(beam) >= self.batch_size:
+                        break # enough for one batch
+                if not beam:
+                    break # all alternatives have been completed in all paths
+                elif not final_beam:
+                    #len(final_beam) < beam_width:
+                    pass # no alternatives have beed completed, and no other edge points to out_node
+                elif beam[0].cum_cost >= final_beam[0].cum_cost + 15:
+                    #beam[0].cum_cost >= final_beam[beam_width-1].cum_cost:
+                    break # keep only best paths (cardinality pruning)
+                # use beam leaves as batch, but with only 1 timestep...
                 # advance states and accumulate costs of all alternatives/strings_ (of different length) in parallel:
-                for position in range(max_length):
-                    # indices to update (next batch):
-                    updates = [j for j in range(len(textequivs)) if position < len(strings_[j])]
-                    if updates == []:
-                        break # no characters left for any textequiv candidate
-                    preds, states = self.predict([candidates[j].value for j in updates],
-                                                 [candidates[j].state for j in updates],
-                                                 context)
-                    for i, j in enumerate(updates):
-                        candidate = candidates[j]
-                        string_ = strings_[j]
-                        conf = confidences[j]
-                        char = string_[position]
-                        if char not in self.mapping[0]:
-                            if not next_beam: # avoid repeating the input error for all current candidates
-                                self.logger.error('unmapped character "%s" at input candidate %d of element %s',
-                                                  char, textequivs[j].index, element.id)
-                            idx = 0
-                        else:
-                            idx = self.mapping[0][char]
-                        candidate.value = char
-                        candidate.state = states[i]
-                        cost = (-log(max(preds[i][idx], 1e-99), 2) * lm_weight + # averaged afterwards/below
-                                -log(max(conf, 1e-99), 2) * (1. - lm_weight)) # repeat length times (because of average)
-                        candidate.cum_cost += cost
-                for candidate, string_ in zip(candidates, strings_):
-                    candidate.value = string_ # not just last char
-                    if (beam_clustering_dist and
-                        self._history_clustering(candidate, next_beam, beam_clustering_dist)):
-                        continue
-                    #self.logger.debug('Adding candidate %x (%s/%.2f) to parent %x (%s/%.2f)',
-                    #                  id(candidate), candidate.value, candidate.cum_cost,
-                    #                  id(alternative), ''.join([n.value for n in alternative.to_sequence()]),
-                    #                  alternative.cum_cost)
+                preds, states = self.predict([alternative.value[-1] if alternative.value
+                                              else alternative.parent.value[-1]
+                                              for alternative in beam],
+                                             [alternative.state
+                                              for alternative in beam],
+                                             context)
+                for i, candidate in enumerate(beam):
+                    conf = candidate.extras[1].conf
+                    char = candidate.extras[1].Unicode[len(candidate.value)]
+                    if char not in self.mapping[0]:
+                        # avoid repeating the input error for all current candidates:
+                        if char not in unmapped_seen.setdefault(candidate.extras[1].index, []):
+                            self.logger.error('unmapped character "%s" at input alternative %d of element %s',
+                                              char, candidate.extras[1].index, element.id)
+                            unmapped_seen[candidate.extras[1].index].append(char)
+                        idx = 0
+                    else:
+                        idx = self.mapping[0][char]
+                    cost = (-log(max(preds[i][idx], 1e-99), 2) * lm_weight + # averaged afterwards/below
+                            -log(max(conf, 1e-99), 2) * (1. - lm_weight)) # repeat length times (because of average)
+                    candidate.cum_cost += cost
+                    candidate.value += char
+                    candidate.state = states[i]
+                    # apply variable length beam treshold:
+                    #if next_beam and candidate.norm_cost >= next_beam[0].norm_cost * 1.002:
+                    #if next_beam and candidate.cum_cost >= next_beam[0].cum_cost * 1.002:
+                    if next_beam and candidate.cum_cost >= next_beam[0].cum_cost + 2.5:
+                        continue # ignore
                     insort_left(next_beam, candidate) # insert sorted by (unnormalised) cumulative costs
-            #self.logger.debug("Shrinking %d paths to best %d", len(next_beam), beam_width)
-            next_beam = next_beam[:beam_width] # keep best paths (cardinality pruning)
-            # also apply variable length beam threshold:
-            for i, alternative in enumerate(next_beam[1:], 1):
-                # allow increase in norm_cost only up to a factor:
-                # measurements on text/model around 2.86 ppl:
-                # - 1.010  gives +3%% ppl / -12% CPU
-                # - 1.005  gives +1%  ppl / -26% CPU
-                # - 1.002  gives +4%  ppl / -53% CPU
-                # - 1.001  gives +7%  ppl / -68% CPU
-                # - 1.0005 gives +13% ppl / -83% CPU
-                #if alternative.norm_cost >= next_beam[0].norm_cost * 1.002:
-                #if alternative.cum_cost >= next_beam[0].cum_cost + 2.5:
-                if alternative.cum_cost >= next_beam[0].cum_cost * 1.01:
-                    next_beam = next_beam[:i]
-                    break
-            out_node['traceback'] = next_beam
+                # keep no more than can ever be processed within (conservative) limits:
+                next_beam = next_beam[:max_batches * self.batch_size]
+            out_node['traceback'] = final_beam[:beam_width]
         assert out == end_node, \
             'breadth-first search failed to reach true end node (%d instead of %d)' % (out, end_node)
         assert 'traceback' in out_node, \
@@ -868,7 +864,7 @@ class Rater(object):
         then remove it from `beam` right away. Otherwise, return True
         (preventing `candidate` from being inserted).
         
-        If no such hypothesis exists, then return False
+        If no such hypothesis exists, then return False 
         (allowing `candidate` to be inserted).
         '''
         for alternative in beam:
@@ -1233,19 +1229,26 @@ class Node(object):
                 self._sequence = None
                 break
             current_node = current_node.parent
+
+    def pro_cost(self):
+        if self.extras:
+            i = len(self.extras[1].Unicode) - len(self.value)
+        else:
+            i = 0
+        return self.cum_cost + 0.5 * i
     
     def __lt__(self, other):
-        return self.cum_cost < other.cum_cost
+        return self.pro_cost() < other.pro_cost()
     def __le__(self, other):
-        return self.cum_cost <= other.cum_cost
+        return self.pro_cost() <= other.pro_cost()
     def __eq__(self, other):
-        return self.cum_cost == other.cum_cost
+        return self.pro_cost() == other.pro_cost()
     def __ne__(self, other):
-        return self.cum_cost != other.cum_cost
+        return self.pro_cost() != other.pro_cost()
     def __gt__(self, other):
-        return self.cum_cost > other.cum_cost
+        return self.pro_cost() > other.pro_cost()
     def __ge__(self, other):
-        return self.cum_cost >= other.cum_cost
+        return self.pro_cost() >= other.pro_cost()
 
 def _read_normalize_file(file):
     text = unicodedata.normalize('NFC', file.read())

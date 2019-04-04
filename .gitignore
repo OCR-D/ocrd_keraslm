@@ -1,2 +1,11 @@
 *.egg-info
-__pycache__
+__pycache__/
+*~
+*.log
+*.pkl
+*.h5
+*.png
+TAGS
+.pytest_cache/
+env/
+env3/
