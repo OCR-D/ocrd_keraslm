@@ -167,8 +167,8 @@ class Rater(object):
         
         # does not converge: clipnorm=1...5, lr=1e-4
         # slower to converge, not better: amsgrad=True, decay=1e-2...1e-6
-        # for transfer of old models without NaN losses: epsilon=0.1
-        self.model.compile(loss='categorical_crossentropy', optimizer=Adam(clipvalue=5.0), metrics=['accuracy']) # 'adam'
+        # for transfer of old models without NaN losses: epsilon=0.2 lr=1e-4
+        self.model.compile(loss='categorical_crossentropy', optimizer=Adam(clipvalue=1.0), metrics=['accuracy']) # 'adam'
         self.status = 1
     
     def underspecify_contexts(self):
@@ -187,22 +187,30 @@ class Rater(object):
         from keras import backend as K
         
         em_dims = embedding_matrix.shape.as_list()
-        lowrank = K.sum(K.square(embedding_matrix)) # generalization/sparsity
+        
+        norms = K.sum(K.square(embedding_matrix), axis=1)
+        norm0 = K.ones_like(norms) # square of target (non-zero) weight norm
+        lowrank = 0.02 * K.sum(K.square(norm0 - norms)) # generalization/sparsity
+        
         vecs1 = K.slice(embedding_matrix, [1, 0], [em_dims[0]-2, em_dims[1]]) # all vectors except zero and last
         vecs2 = K.slice(embedding_matrix, [2, 0], [em_dims[0]-2, em_dims[1]]) # all vectors except zero and first
-        vecs1 = K.stop_gradient(vecs1) # make sure only vecs2 is affected, i.e. t is not influenced by t+1
-        smoothness = K.sum(K.square(vecs1 - vecs2)) # dist(t, t+1)
+        # make sure only vecs2 is affected, i.e. t is not influenced by t+1:
+        vecs1 = K.stop_gradient(vecs1)
+        smoothness = 0.2 * K.sum(K.dot(vecs1, K.transpose(vecs2))) # dist(t, t+1)
         # todo: learn adjacency matrix for categorical meta-data (update every epoch)
+        
         vec0 = K.slice(embedding_matrix, [0, 0], [1, em_dims[1]])            # zero vector only,
-        vec0 = K.repeat_elements(vec0, em_dims[0]-1, axis=0)                 # repeated
         vecs = K.slice(embedding_matrix, [1, 0], [em_dims[0]-1, em_dims[1]]) # all vectors except zero
-        vecs = K.stop_gradient(vecs) # make sure only vec0 is affected, i.e. vecs change only via global loss
+        # make sure only vec0 is affected, i.e. vecs change only via global loss:
+        wgts = K.stop_gradient(K.batch_dot(vecs, vecs, axes=1))
+        vecs = K.stop_gradient(K.mean(vecs, axis=0))
         # self-product increases weight of embedding vectors with large magnitude (i.e. more evidence):
-        wgts = K.batch_dot(vecs, vecs, axes=1)
-        underspecification = K.sum(K.square(vec0 - wgts * vecs)) # t=0 ~ weighted mean of t>0
+        underspecification = 2 * K.sum(K.square(vec0 - wgts * vecs)) # t=0 ~ weighted mean of t>0
         
         # todo: find good relative weights between these subtargets
-        return self.smoothing * (lowrank + smoothness + underspecification)
+        # make sure loss contribution is zero after training/validation
+        # (so loss corresponds to perplexity in prediction/evaluation):
+        return K.in_train_phase(lowrank + smoothness + underspecification, 0.)
     
     def _regularise_chars(self, embedding_matrix):
         '''Calculate L2 loss of the char embedding weights
@@ -214,15 +222,21 @@ class Rater(object):
         em_dims = embedding_matrix.shape.as_list()
         if em_dims[0] == 0: # voc_size starts with 0 before first training
             return 0
+        
         vec0 = K.slice(embedding_matrix, [0, 0], [1, em_dims[1]])            # zero vector only,
-        vec0 = K.repeat_elements(vec0, em_dims[0]-1, axis=0)                 # repeated
         vecs = K.slice(embedding_matrix, [1, 0], [em_dims[0]-1, em_dims[1]]) # all vectors except zero
         # make sure only vec0 is affected, i.e. vecs change only via global loss:
-        vecs = K.stop_gradient(vecs)
+        vecs = K.stop_gradient(K.mean(vecs, axis=0))
         # scale to make gradients benign:
-        underspecification = K.sum(K.square(0.001 * (vec0 - vecs))) # c='\0' ~ mean of others
-        lowrank = K.sum(K.square(0.001 * embedding_matrix)) # generalization/sparsity
-        return lowrank + underspecification
+        underspecification = 1 * K.sum(K.square(vec0 - vecs)) # c='\0' ~ mean of others
+        
+        norms = K.sum(K.square(embedding_matrix), axis=1)
+        norm0 = K.ones_like(norms) # square of target (non-zero) weight norm
+        lowrank = 0.01 * K.sum(K.square(norm0 - norms)) # generalization/sparsity
+        
+        # make sure loss contribution is zero after training/validation
+        # (so loss corresponds to perplexity in prediction/evaluation):
+        return K.in_train_phase(lowrank + underspecification, 0.)
     
     def train(self, data, val_data=None):
         '''Train model on text files.
@@ -572,8 +586,8 @@ class Rater(object):
             char = candidates[i]
             if char not in self.mapping[0]:
                 # suppress the input error because it must be an aftereffect
-                # of an error already reported by the caller (wrapper.rate)
-                # – generative use case does not produce unmapped output (scripts.run.generate):
+                # of an error already reported by the caller (lib.rate_best)
+                # – generative use case does not produce unmapped output (lib.generate):
                 #self.logger.error('unmapped character "%s" at input alternative %d', char, i)
                 idx = 0
             else:
@@ -1086,7 +1100,7 @@ class Rater(object):
         charlay = self.model.get_layer(name='char_embedding')
         charwgt = charlay.get_weights()[0]
         charcor = np.dot(charwgt, charwgt.T) # confusion matrix
-        plt.imsave(filename, np.log(np.abs(charcor)), cmap=cm.gray)
+        plt.imsave(filename, np.abs(charcor), cmap=cm.gray)
     
     def plot_context_embeddings_similarity(self, filename, n=1):
         '''Paint a heat map of context embeddings.
@@ -1106,7 +1120,7 @@ class Rater(object):
         ctxtlay = self.model.get_layer(name='context%d_embedding' % n)
         ctxtwgt = ctxtlay.get_weights()[0]
         ctxtcor = np.dot(ctxtwgt, ctxtwgt.T) # confusion matrix
-        plt.imsave(filename, np.log(np.abs(ctxtcor)), cmap=cm.gray)
+        plt.imsave(filename, np.abs(ctxtcor), cmap=cm.gray)
 
     def plot_context_embeddings_projection(self, filename, n=1):
         '''Paint a 2-d PCA projection of context embeddings.
