@@ -19,7 +19,6 @@ CHOICE_THRESHOLD_CONF = 0.1 # maximum score drop from best choice to try per ele
 #beam_width = 100 # maximum number of best partial paths to consider during search with alternative_decoding
 BEAM_CLUSTERING_ENABLE = True # enable pruning partial paths by history clustering
 BEAM_CLUSTERING_DIST = 5 # maximum distance between state vectors to form a cluster
-MAX_LENGTH = 500 # maximum string length of TextEquiv alternatives
 
 # similar to ocrd.validator.page_validator._HIERARCHY:
 _HIERARCHY = {'Page': 'region', 'TextRegion': 'line', 'TextLine': 'word', 'Word': 'glyph', 'Glyph': ''}
@@ -131,7 +130,6 @@ class KerasRate(Processor):
                     start_traceback=prev_traceback,
                     context=context,
                     lm_weight=lm_weight,
-                    max_length=MAX_LENGTH,
                     beam_width=beam_width,
                     beam_clustering_dist=BEAM_CLUSTERING_DIST if BEAM_CLUSTERING_ENABLE else 0)
 
@@ -155,7 +153,7 @@ class KerasRate(Processor):
                 prev_traceback = traceback
         
         if prev_pcgts:
-            path, entropy, _ = self.rater.next_path(prev_traceback, [])
+            path, entropy, _ = self.rater.next_path(prev_traceback[0], ([], prev_traceback[1]))
             _page_update_from_path(level, path, entropy)
             
             # ensure parent textequivs are up to date:

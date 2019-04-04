@@ -690,7 +690,7 @@ class Rater(object):
     def rate_best(self, graph, start_node, end_node,
                   start_traceback=None,
                   context=None, lm_weight=0.5,
-                  max_length=500, beam_width=100, beam_clustering_dist=0):
+                  max_length=500, beam_width=10, beam_clustering_dist=0):
         '''Rate a lattice of string alternatives, decoding the best-scoring path, incrementally.
         
         The lattice `graph` must be a networkx.DiGraph instance (i.e. a unigraph)
@@ -721,7 +721,6 @@ class Rater(object):
         Additional parameters:
         - `lm_weight`: share for language model in the linear combination
           of log probability scores for language model and previous confidence
-        - `max_length`: guaranteed boundary on string length of readings
         - `beam_width`: number of hypotheses (histories) to keep between elements
         - `beam_clustering_dist`: maximum distance between HL state vectors
           to form a cluster for pruning
@@ -737,130 +736,157 @@ class Rater(object):
         import networkx as nx
         
         if not start_traceback:
-            start_traceback = [Node(state=None, value='\n', cost=0.0)]
-        graph.nodes[start_node]['traceback'] = start_traceback
+            alternative = Node(state=None, value='\n', cost=0.0)
+            start_traceback = ([alternative], alternative)
+        graph.nodes[start_node]['traceback'], _ = start_traceback
         out = 0
         for in_, out in nx.bfs_edges(graph, start_node): # breadth-first search
             edge = graph.edges[in_, out]
             element = edge['element']
             textequivs = edge['alternatives']
+            strings_ = [textequiv.Unicode for textequiv in textequivs] # alternative character sequences
+            confidences = [textequiv.conf for textequiv in textequivs] # alternative probabilities
             in_node = graph.nodes[in_]
             out_node = graph.nodes[out]
             # make sure we have already been at in_node
-            assert 'traceback' in in_node, "breadth-first search should have visited %d first in '%s'" % (in_, element.id)
-            fringe = in_node['traceback']
-            next_fringe = out_node['traceback'] if 'traceback' in out_node else []
-            self.logger.debug("Rating '%s', combining %d new inputs with %d existing paths, competing with %d existing paths",
-                              element.id if element else "space", len(textequivs), len(fringe), len(next_fringe))
-            for node in fringe:
-                # make a copy of parent node for each textequiv alternative
-                new_nodes = [Node(parent=node,
-                                  state=node.state, # changes during character-wise prediction
-                                  value=node.value, # changes during character-wise prediction
-                                  cost=0.0,         # accumulates during character-wise prediction
-                                  extras=(element, textequiv)) for textequiv in textequivs]
-                strings_ = [textequiv.Unicode for textequiv in textequivs] # alternative character sequences
-                confidences = [textequiv.conf for textequiv in textequivs] # alternative probabilities
+            assert 'traceback' in in_node, \
+                "breadth-first search should have visited %d first in '%s'" % (in_, element.id)
+            beam = in_node['traceback']
+            next_beam = out_node['traceback'] if 'traceback' in out_node else []
+            self.logger.debug("Rating '%s', combining %d new inputs "
+                              "with %d existing paths, competing with %d existing paths",
+                              element.id if element else "space", len(textequivs),
+                              len(beam), len(next_beam))
+            for alternative in beam:
+                if (len(next_beam) >= beam_width and
+                    alternative >= next_beam[beam_width-1]):
+                    #self.logger.debug("alternative '%s' fell off the beam before combination already",
+                    #                  ''.join([n.value for n in alternative.to_sequence()]))
+                    continue # ignore
+                # make a copy of parent alternative for each textequiv alternative
+                candidates = [Node(parent=alternative,
+                                   state=alternative.state, # changes during character-wise prediction
+                                   value=alternative.value[-1], # changes during character-wise prediction
+                                   cost=0.0,         # accumulates during character-wise prediction
+                                   extras=(element, textequiv))
+                              for textequiv in textequivs]
                 # advance states and accumulate costs of all alternatives/strings_ (of different length) in parallel:
                 for position in range(max_length):
                     # indices to update (next batch):
                     updates = [j for j in range(len(textequivs)) if position < len(strings_[j])]
                     if updates == []:
-                        break # no characters left for any textequiv alternative
-                    preds, states = self.predict([new_nodes[j].value for j in updates],
-                                                 [new_nodes[j].state for j in updates],
+                        break # no characters left for any textequiv candidate
+                    preds, states = self.predict([candidates[j].value for j in updates],
+                                                 [candidates[j].state for j in updates],
                                                  context)
-                    for alternative, update in enumerate(updates):
-                        new_node = new_nodes[update]
-                        string_ = strings_[update]
-                        conf = confidences[update]
+                    for i, j in enumerate(updates):
+                        candidate = candidates[j]
+                        string_ = strings_[j]
+                        conf = confidences[j]
                         char = string_[position]
                         if char not in self.mapping[0]:
-                            if not next_fringe: # avoid repeating the input error for all current candidates
-                                self.logger.error('unmapped character "%s" at input alternative %d of element %s',
-                                                  char, textequivs[updates[alternative]].index, element.id)
+                            if not next_beam: # avoid repeating the input error for all current candidates
+                                self.logger.error('unmapped character "%s" at input candidate %d of element %s',
+                                                  char, textequivs[j].index, element.id)
                             idx = 0
                         else:
                             idx = self.mapping[0][char]
-                        new_node.value = char
-                        new_node.state = states[alternative]
-                        new_node.cum_cost += -log(max(preds[alternative][idx], 1e-99), 2) * lm_weight # averaged afterwards/below
-                        new_node.cum_cost += -log(max(conf, 1e-99), 2) * (1. - lm_weight) # repeat length times (because of average)
-                for new_node, string_ in zip(new_nodes, strings_):
-                    new_node.value = string_ # not just last char
-                    if beam_clustering_dist and self._history_clustering(new_node, next_fringe, beam_clustering_dist):
+                        candidate.value = char
+                        candidate.state = states[i]
+                        cost = (-log(max(preds[i][idx], 1e-99), 2) * lm_weight + # averaged afterwards/below
+                                -log(max(conf, 1e-99), 2) * (1. - lm_weight)) # repeat length times (because of average)
+                        candidate.cum_cost += cost
+                for candidate, string_ in zip(candidates, strings_):
+                    candidate.value = string_ # not just last char
+                    if (beam_clustering_dist and
+                        self._history_clustering(candidate, next_beam, beam_clustering_dist)):
                         continue
-                    insort_left(next_fringe, new_node) # insert sorted by (unnormalised) cumulative costs
-            #self.logger.debug("Shrinking %d paths to best %d", len(next_fringe), beam_width)
-            # todo: use some variable length beam threshold
-            next_fringe = next_fringe[:beam_width] # keep best paths (cardinality pruning)
-            out_node['traceback'] = next_fringe
-        assert out == end_node, 'breadth-first search failed to reach true end node (%d instead of %d)' % (out, end_node)
-        assert 'traceback' in out_node, "breadth-first search failed to reach end node with any result"
-
-        traceback = out_node['traceback']
-        result, entropy, next_traceback = self.next_path(traceback, start_traceback)
-        return result, entropy, next_traceback
+                    #self.logger.debug('Adding candidate %x (%s/%.2f) to parent %x (%s/%.2f)',
+                    #                  id(candidate), candidate.value, candidate.cum_cost,
+                    #                  id(alternative), ''.join([n.value for n in alternative.to_sequence()]),
+                    #                  alternative.cum_cost)
+                    insort_left(next_beam, candidate) # insert sorted by (unnormalised) cumulative costs
+            #self.logger.debug("Shrinking %d paths to best %d", len(next_beam), beam_width)
+            next_beam = next_beam[:beam_width] # keep best paths (cardinality pruning)
+            # also apply variable length beam threshold:
+            for i, alternative in enumerate(next_beam[1:], 1):
+                # allow increase in norm_cost only up to a factor:
+                # measurements on text/model around 2.86 ppl:
+                # - 1.010  gives +3%% ppl / -12% CPU
+                # - 1.005  gives +1%  ppl / -26% CPU
+                # - 1.002  gives +4%  ppl / -53% CPU
+                # - 1.001  gives +7%  ppl / -68% CPU
+                # - 1.0005 gives +13% ppl / -83% CPU
+                #if alternative.norm_cost >= next_beam[0].norm_cost * 1.002:
+                #if alternative.cum_cost >= next_beam[0].cum_cost + 2.5:
+                if alternative.cum_cost >= next_beam[0].cum_cost * 1.01:
+                    next_beam = next_beam[:i]
+                    break
+            out_node['traceback'] = next_beam
+        assert out == end_node, \
+            'breadth-first search failed to reach true end node (%d instead of %d)' % (out, end_node)
+        assert 'traceback' in out_node, \
+            "breadth-first search failed to reach end node with any result"
+        
+        result, entropy, traceback = self.next_path(out_node['traceback'], start_traceback)
+        return result, entropy, traceback
 
     # todo: make independent of Rater
-    def next_path(self, traceback, start_traceback):
-        '''Advance from `start_traceback` to `traceback`.
+    def next_path(self, beam, traceback):
+        '''Advance from `traceback` to `beam`.
         
         (Last part of `rate_best` with same return values.)
         '''
-        best = traceback[0] # best-scoring hypothesis so far
-        best_path = best.to_sequence(stop_at=start_traceback) # path before start_traceback
-        start_node = best_path[-1] # Node from start_traceback we stopped at
-        end_node = best_path[0] # Node from start_traceback we cut last time
+        prev_beam, prev_start_node = traceback # Node from previous traceback we have cut
+        best_node = beam[0] # best-scoring hypothesis so far
+        best_path = best_node.to_sequence(stop_at=prev_beam) # path before prev_beam
+        start_node = best_path[-1] # Node from prev_beam we stopped at
         result = []
         for node in best_path:
             if node.extras:
                 element, textequiv = node.extras
-                parent_cost = node.parent.cum_cost if node.parent else end_node.cum_cost # FIXME: end_node is wrong
+                parent_cost = node.parent.cum_cost if node.parent else prev_start_node.cum_cost
                 score = pow(2.0, -(node.cum_cost - parent_cost) / len(textequiv.Unicode)) # average probability
                 result.append((element, textequiv, score))
-        next_traceback = []
-        for node in traceback:
-            other_path = node.to_sequence(stop_at=[start_node])
+        next_beam = []
+        for alternative in beam:
+            other_path = alternative.to_sequence(stop_at=[start_node])
             if not other_path: # hypothesis does not derive from chosen path
                 continue
-            node.cut_at(start_node) # remove old part from sequence
-            next_traceback.append(node)
-        return result, start_node.cum_cost - end_node.cum_cost, next_traceback # FIXME: end_node is wrong
+            alternative.cut_at(start_node) # remove old part from sequence
+            insort_left(next_beam, alternative)
+        return result, start_node.cum_cost - prev_start_node.cum_cost, (next_beam, start_node)
     
-    #def rate_all(self, graph, start_node, end_node, push_forward_k=1):
-    #    '''Rate a lattice of string alternatives, rescoring all edges.'''
-    
-    def _history_clustering(self, new_node, next_fringe, distance=5):
+    def _history_clustering(self, candidate, beam, distance=5):
         '''Determine whether a node may enter the beam, or has redundant history.
         
-        Search hypotheses in `next_fringe` for similarities to `new_node`,
+        Search hypotheses in `beam` for similarities to `candidate`,
         comparing their hidden layer state (history) vectors, considering them
         similar if the vector norm is below `distance`.
         
-        If such hypothesis exists, compare scores: If it is worse than `new_node`,
-        then remove it from `next_fringe` right away. Otherwise, return True
-        (preventing `new_node` from being inserted).
+        If such hypothesis exists, compare scores: If it is worse than `candidate`,
+        then remove it from `beam` right away. Otherwise, return True
+        (preventing `candidate` from being inserted).
         
-        If no such hypothesis exists, then return False (allowing `new_node`
-        to be inserted).
+        If no such hypothesis exists, then return False
+        (allowing `candidate` to be inserted).
         '''
-        for old_node in next_fringe:
-            if (new_node.value == old_node.value and
-                all(np.linalg.norm(new_node.state[layer] - old_node.state[layer]) < distance
+        for alternative in beam:
+            if (candidate.value == alternative.value and
+                all(np.linalg.norm(candidate.state[layer] - alternative.state[layer]) < distance
                     for layer in range(self.depth))):
-                if old_node.cum_cost < new_node.cum_cost:
+                if alternative.cum_cost < candidate.cum_cost:
                     # self.logger.debug("discarding %s in favour of %s due to history clustering",
-                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in new_node.to_sequence()[1:]]),
-                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in old_node.to_sequence()[1:]]))
-                    return True # continue with next new_node
+                    #                   ''.join([n.extras[1].Unicode for n in candidate.to_sequence()[1:]]),
+                    #                   ''.join([n.extras[1].Unicode for n in alternative.to_sequence()[1:]]))
+                    return True # continue with next candidate
                 else:
                     # self.logger.debug("neglecting %s in favour of %s due to history clustering",
-                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in old_node.to_sequence()[1:]]),
-                    #                   ''.join([prev_node.extras[1].Unicode for prev_node in new_node.to_sequence()[1:]]))
-                    next_fringe.remove(old_node)
-                    break # immediately proceed to insert new_node
-        return False # proceed to insert new_node (no clustering possible)
+                    #                   ''.join([n.extras[1].Unicode for n in alternative.to_sequence()[1:]]),
+                    #                   ''.join([n.extras[1].Unicode for n in candidate.to_sequence()[1:]]))
+                    beam.remove(alternative)
+                    break # immediately proceed to insert candidate
+        return False # proceed to insert candidate (no clustering possible)
     
     def save(self, filename):
         '''Save weights of the trained model, and configuration parameters.
@@ -1172,6 +1198,7 @@ class Node(object):
         self.state = state # list of recurrent hidden layers states (h and c for each layer)
         self.cum_cost = parent.cum_cost + cost if parent else cost
         self.length = 1 if parent is None else parent.length + 1
+        #self.norm_cost = self.cum_cost / self.length
         self.extras = extras # node identifier
         self._sequence = None
         #print('added node', ''.join([n.value for n in self.to_sequence()]))

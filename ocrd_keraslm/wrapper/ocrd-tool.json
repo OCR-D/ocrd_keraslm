@@ -47,7 +47,7 @@
           "type": "number",
           "format": "integer",
           "description": "maximum number of best partial paths to consider during search with alternative_decoding",
-          "default": 100
+          "default": 10
         },
         "lm_weight": {
           "type": "number",
