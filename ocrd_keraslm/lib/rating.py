@@ -287,7 +287,8 @@ class Rater(object):
         # set state
         if 'val_loss' in history.history:
             self.logger.info('training finished with val_loss %f', min(history.history['val_loss']))
-            if np.isnan(history.history['loss'][-1]):
+            if (np.isnan(history.history['val_loss'][-1]) or
+                earlystopping.stopped_epoch == 0):
                 # recover weights (which TerminateOnNaN prevented EarlyStopping from doing)
                 self.model.set_weights(earlystopping.best_weights)
             self.status = 2
