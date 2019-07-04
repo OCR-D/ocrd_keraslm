@@ -949,9 +949,13 @@ class Rater(object):
                 file.seek(0)
                 if self.stateful and train:
                     self.reset_cb.reset(file.name)
-                name = os.path.basename(file.name).split('.')[0]
-                author = name.split('_')[0]
-                year = ceil(int(name.split('_')[-1])/10)
+                name = os.path.basename(file.name).split('.')[0].split('_')
+                if len(name) == 3:
+                    author = name[0]
+                    year = ceil(int(name[2])/10)
+                else:
+                    author = ''
+                    year = 0
                 yield from self._gen_data(_read_normalize_file(file)[0], [year], steps, train, split)
             if not repeat:
                 break # causes StopIteration exception if calculated epoch size is too large
