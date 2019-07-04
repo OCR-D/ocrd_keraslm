@@ -741,7 +741,23 @@ class Rater(object):
             start_traceback = ([alternative], alternative)
         graph.nodes[start_node]['traceback'], _ = start_traceback
         out = 0
-        for in_, out in nx.bfs_edges(graph, start_node): # breadth-first search
+        #for in_, out in nx.bfs_edges(graph, start_node): # breadth-first search
+        # to circumvent networkx #3498 (bfs_edges is not exhaustive):
+        def bfs_edges(graph, source):
+            from collections import deque
+            visited = set()
+            queue = deque([(source, graph.neighbors(source))])
+            while queue:
+                parent, children = queue[0]
+                try:
+                    child = next(children)
+                    if (parent, child) not in visited:
+                        yield parent, child
+                        visited.add((parent, child))
+                        queue.append((child, graph.neighbors(child)))
+                except StopIteration:
+                    queue.popleft()
+        for in_, out in bfs_edges(graph, start_node): # breadth-first search
             edge = graph.edges[in_, out]
             element = edge['element']
             textequivs = edge['alternatives']
