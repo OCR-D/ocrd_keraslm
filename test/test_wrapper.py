@@ -36,8 +36,7 @@ class TestKerasRate(TestCase):
             ).process()
         workspace.save_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-WORD'):
-            continue # todo: for some reason, from_file yields NoneType here
-            pcgts = page_from_file(file)
+            pcgts = page_from_file(workspace.download_file(file))
             metadata = pcgts.get_Metadata()
             self.assertIsNotNone(metadata)
             metadataitems = metadata.get_MetadataItem()
@@ -67,14 +66,14 @@ class TestKerasRate(TestCase):
             ).process()
         workspace.save_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-GLYPH'):
-            continue # todo: for some reason, from_file yields NoneType here
-            pcgts = page_from_file(file)
+            pcgts = page_from_file(workspace.download_file(file))
             metadata = pcgts.get_Metadata()
             self.assertIsNotNone(metadata)
             metadataitems = metadata.get_MetadataItem()
             self.assertIsNotNone(metadataitems)
             rated = any([i for i in metadataitems if i.get_value() == 'ocrd-keraslm-rate'])
             self.assertTrue(rated)
+            page = pcgts.get_Page()
             for region in page.get_TextRegion():
                 for line in region.get_TextLine():
                     for word in line.get_Word():
