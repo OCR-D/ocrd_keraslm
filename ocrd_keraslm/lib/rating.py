@@ -739,14 +739,23 @@ class Rater(object):
         if not start_traceback:
             alternative = Node(state=None, value='\n', cost=0.0)
             start_traceback = ([alternative], alternative)
+        def bfs_edges(G, start):
+            order = nx.topological_sort(G)
+            nodes = [start]
+            for out in order:
+                for in_, _ in G.in_edges([out]):
+                    if in_ in nodes:
+                        yield in_, out
+                        nodes.append(out)
         graph.nodes[start_node]['traceback'], _ = start_traceback
         out = 0
-        for in_, out in nx.edge_bfs(graph, start_node): # breadth-first search
+        for in_, out in bfs_edges(graph, start_node): # breadth-first search
             edge = graph.edges[in_, out]
             element = edge['element']
             textequivs = edge['alternatives']
             in_node = graph.nodes[in_]
             out_node = graph.nodes[out]
+            self.logger.debug("rating %d alternatives from %d to %d", len(textequivs), in_, out)
             # make sure we have already been at in_node
             assert 'traceback' in in_node, \
                 "breadth-first search should have visited %d first in '%s'" % (in_, element.id)
