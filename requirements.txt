@@ -1,5 +1,7 @@
-ocrd >= 0.8.0
+ocrd >= 1.0.0b10
 click
-keras
+keras >= 2.2.4
 numpy
 tensorflow
+h5py
+networkx

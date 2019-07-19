@@ -1,2 +1,2 @@
 pytest
-ocrd_tesserocr
+ocrd_tesserocr >= 0.3.0

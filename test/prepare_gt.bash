@@ -42,35 +42,28 @@ EOF
 for GT_FILE in $GT_FILES; do
     test -f "$CACHE_DIR/${GT_FILE}.zip" ||
         wget -P "$CACHE_DIR" http://www.ocr-d.de/sites/all/GTDaten/${GT_FILE}.zip
-    unzip -d "$TMP_DIR" "$CACHE_DIR/${GT_FILE}.zip"
-    pushd "$TMP_DIR/$GT_FILE/$GT_FILE"
+    unzip -jod "$TMP_DIR/$GT_FILE" "$CACHE_DIR/${GT_FILE}.zip"
+    pushd "$TMP_DIR/$GT_FILE"
     ocrd workspace init .
     ZEROS=0000
     i=0
-    for PAGE_FILE in page/*.xml; do
+    for PAGE_FILE in *.xml; do
+		test "x$PAGE_FILE" = xmets.xml && continue
         i=$((i+1))
         ID=${ZEROS:0:$((4-${#i}))}$i
         IMG_FILE=$(xsltproc "$TMP_DIR/page-extract-imagefilename.xsl" "$PAGE_FILE")
         test -f "$IMG_FILE"
-        ocrd workspace add -G OCR-D-IMG -i OCR-D-IMG_$ID -g OCR-D-IMG_$ID -m image/tiff "$IMG_FILE"
-        ocrd workspace add -G OCR-D-GT-PAGE -i OCR-D-GT-PAGE_$ID -g OCR-D-IMG_$ID -m application/vnd.prima.page+xml "$PAGE_FILE"
+        ocrd workspace add -G OCR-D-IMG -i OCR-D-IMG_$ID -g phys_$ID -m image/tiff "$IMG_FILE"
+        ocrd workspace add -G OCR-D-GT-PAGE -i OCR-D-GT-PAGE_$ID -g phys_$ID -m application/vnd.prima.page+xml "$PAGE_FILE"
+		# workaround for OCR-D/core/issues/176 (still true for ocrd v1.0.0b10 !!)
+        sed -i -e "s|imageFilename=\"[^\"]*\"|imageFilename=\"OCR-D-IMG/OCR-D-IMG_$ID\"|" "$PAGE_FILE"
     done
+	ocrd zip bag -i ${GT_FILE}.zip -D full -Z -I
     popd
 done
 
-# this would break URIs:
-#mv "$TMP_DIR" "$1" # atomic
-# clone+cp instead:
-trap "rm -fr '$TMP_DIR' '$1'" ERR
-mkdir -p "$1"
-for GT_FILE in $GT_FILES; do # not so atomic
-    WORKSPACE="$TMP_DIR/$GT_FILE/$GT_FILE"
-    ocrd workspace clone -l "$WORKSPACE/mets.xml" "$1/$GT_FILE"
-    for PAGE_FILE in "$1/$GT_FILE/OCR-D-GT-PAGE/"*.xml; do # workaround for OCR-D/core issue #176
-        sed -ie "s|imageFilename=\"|imageFilename=\"file://$PWD/$1/$GT_FILE/OCR-D-IMG/|" "$PAGE_FILE"
-    done
-    cp "$TMP_DIR/${GT_FILE}.txt" "$1"
-done
-rm -fr "$TMP_DIR"
+mv "$TMP_DIR" "$1" # atomic
+
+
 
 

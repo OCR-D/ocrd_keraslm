@@ -8,6 +8,7 @@ disable =
     too-many-locals,
     too-few-public-methods,
     too-many-branches,
+    too-many-lines,
     too-many-statements,
     too-many-nested-blocks,
     too-many-instance-attributes,
@@ -21,4 +22,4 @@ disable =
 no-space-check=empty-line
 
 # allow non-snake-case identifiers:
-good-names=x,y,n,i,j
+good-names=x,y,z,zs,c,n,h,i,j

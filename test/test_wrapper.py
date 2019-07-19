@@ -3,8 +3,9 @@ import shutil
 from unittest import TestCase, main
 
 from ocrd.resolver import Resolver
-from ocrd.model.ocrd_page import from_file, to_xml
-from ocrd import MIMETYPE_PAGE
+from ocrd_models.ocrd_page import to_xml
+from ocrd_modelfactory import page_from_file
+from ocrd_utils import MIMETYPE_PAGE
 from ocrd_tesserocr.recognize import TesserocrRecognize
 from ocrd_keraslm.wrapper import KerasRate
 
@@ -20,56 +21,38 @@ class TestKerasRate(TestCase):
 
     def runTest(self):
         resolver = Resolver()
-        workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/mets.xml', directory=WORKSPACE_DIR, download_local=True)
-        for file in workspace.mets.find_files(fileGrp='OCR-D-GT-PAGE'):
-            grp='OCR-D-GT-SEG-LINE'
-            ID=grp + '_' + file.ID.split(sep='_')[-1]
-            pcgts = from_file(file)
-            page = pcgts.get_Page()
-            for region in page.get_TextRegion():
-                for line in region.get_TextLine():
-                    line.set_TextEquiv([]) # remove text results (interferes with Tesserocr)
-                    line.set_Word([]) # remove word annotation (interferes with Tesserocr, has wrong tokenization)
-            workspace.add_file(
-                ID=ID,
-                file_grp=grp,
-                basename=ID + '.xml',
-                mimetype=MIMETYPE_PAGE,
-                content=to_xml(pcgts))
-        TesserocrRecognize(
-            workspace,
-            input_file_grp='OCR-D-GT-SEG-LINE',
-            output_file_grp='OCR-D-OCR-TESS-WORD',
-            parameter={'textequiv_level': 'word',
-                       'model': 'Fraktur'}
-            ).process()
-        workspace.save_mets()
+        workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/data/mets.xml', dst_dir=WORKSPACE_DIR, download=True)
+        self.assertIsNotNone(workspace)
+        #
+        # rate text alternative 1 on the word level:
+        #
         KerasRate(
             workspace,
-            input_file_grp='OCR-D-OCR-TESS-WORD',
+            input_file_grp='OCR-D-GT-PAGE', # has wrong tokenisation but that's ok now
             output_file_grp='OCR-D-LM-WORD',
             parameter={'textequiv_level': 'word',
                        'alternative_decoding': False,
-                       'weight_file': PWD + '/../model_dta_test.weights.h5',
-                       'config_file': PWD + '/../model_dta_test.config.pkl'}
+                       'model_file': PWD + '/../model_dta_test.h5'}
             ).process()
         workspace.save_mets()
-        workspace.reload_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-WORD'):
-            continue # todo: for some reason, from_file yields NoneType here
-            pcgts = from_file(file)
+            pcgts = page_from_file(workspace.download_file(file))
             metadata = pcgts.get_Metadata()
-            assertIsNotNone(metadata)
+            self.assertIsNotNone(metadata)
             metadataitems = metadata.get_MetadataItem()
-            assertIsNotNone(metadataitems)
+            self.assertIsNotNone(metadataitems)
             rated = any([i for i in metadataitems if i.get_value() == 'ocrd-keraslm-rate'])
-            assertTrue(rated)
-        TesserocrRecognize(
+            self.assertTrue(rated)
+        # 
+        # rate and viterbi-decode all text alternatives on the glyph level:
+        # 
+        TesserocrRecognize( # we need this to get alternatives to decode
             workspace,
-            input_file_grp='OCR-D-GT-SEG-LINE',
+            input_file_grp='OCR-D-GT-PAGE', # has wrong tokenisation but that's ok now
             output_file_grp='OCR-D-OCR-TESS-GLYPH',
             parameter={'textequiv_level': 'glyph',
-                       'model': 'deu-frak'}
+                       'overwrite_words': True,
+                       'model': 'deu-frak'} # old model for alternatives
             ).process()
         workspace.save_mets()
         KerasRate(
@@ -78,26 +61,24 @@ class TestKerasRate(TestCase):
             output_file_grp='OCR-D-LM-GLYPH',
             parameter={'textequiv_level': 'glyph',
                        'alternative_decoding': True,
-                       'beam_width': 10,
-                       'weight_file': PWD + '/../model_dta_test.weights.h5',
-                       'config_file': PWD + '/../model_dta_test.config.pkl'}
+                       'beam_width': 10, # not too slow
+                       'model_file': PWD + '/../model_dta_test.h5'}
             ).process()
         workspace.save_mets()
-        workspace.reload_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-GLYPH'):
-            continue # todo: for some reason, from_file yields NoneType here
-            pcgts = from_file(file)
+            pcgts = page_from_file(workspace.download_file(file))
             metadata = pcgts.get_Metadata()
-            assertIsNotNone(metadata)
+            self.assertIsNotNone(metadata)
             metadataitems = metadata.get_MetadataItem()
-            assertIsNotNone(metadataitems)
+            self.assertIsNotNone(metadataitems)
             rated = any([i for i in metadataitems if i.get_value() == 'ocrd-keraslm-rate'])
-            assertTrue(rated)
+            self.assertTrue(rated)
+            page = pcgts.get_Page()
             for region in page.get_TextRegion():
                 for line in region.get_TextLine():
                     for word in line.get_Word():
                         for glyph in word.get_Glyph():
-                            assertEqual(len(glyph.get_TextEquiv()), 1) # only 1-best results
+                            self.assertEqual(len(glyph.get_TextEquiv()), 1) # only 1-best results
 
 if __name__ == '__main__':
     main()
