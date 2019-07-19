@@ -1,16 +1,25 @@
 from __future__ import absolute_import
+import os
 from math import log, ceil
 
-from ocrd import Processor, MIMETYPE_PAGE
-from ocrd.validator.page_validator import PageValidator, ConsistencyError
-from ocrd.utils import getLogger, concat_padded, xywh_from_points, points_from_xywh
-from ocrd.model.ocrd_page import from_file, to_xml, GlyphType, CoordsType, TextEquivType
-from ocrd.model.ocrd_page_generateds import MetadataItemType, LabelsType, LabelType
+from ocrd import Processor
+from ocrd_validators.page_validator import PageValidator, ConsistencyError
+from ocrd_utils import (
+    getLogger, concat_padded,
+    xywh_from_points, points_from_xywh,
+    MIMETYPE_PAGE
+)
+from ocrd_modelfactory import page_from_file
+from ocrd_models.ocrd_page import (
+    to_xml, GlyphType,
+    MetadataItemType, LabelsType, LabelType,
+    CoordsType, TextEquivType
+)
 
 import networkx as nx
 
-from ocrd_keraslm.wrapper.config import OCRD_TOOL
-from ocrd_keraslm import lib
+from .config import OCRD_TOOL
+from .. import lib
 
 LOG = getLogger('processor.KerasRate')
 
@@ -54,13 +63,15 @@ class KerasRate(Processor):
 
         prev_traceback = None
         prev_pcgts = None
+        prev_file_id = None
         for (n, input_file) in enumerate(self.input_files):
-            LOG.info("INPUT FILE %i / %s", n, input_file)
-            pcgts = from_file(self.workspace.download_file(input_file))
+            page_id = input_file.pageId or input_file.ID
+            LOG.info("INPUT FILE %i / %s", n, page_id)
+            pcgts = page_from_file(self.workspace.download_file(input_file))
             LOG.info("Scoring text in page '%s' at the %s level", pcgts.get_pcGtsId(), level)
             
             # annotate processing metadata:
-            metadata = pcgts.get_Metadata() # ensured by from_file()
+            metadata = pcgts.get_Metadata() # ensured by page_from_file()
             metadata.add_MetadataItem(
                 MetadataItemType(type_="processingStep",
                                  name=OCRD_TOOL['tools']['ocrd-keraslm-rate']['steps'][0],
@@ -115,11 +126,13 @@ class KerasRate(Processor):
                 page_update_higher_textequiv_levels(level, pcgts)
             
                 # write back result
-                file_id = concat_padded(self.output_file_grp, n)
+                file_id = input_file.ID.replace(self.input_file_grp, self.output_file_grp)
+                if file_id == input_file.ID:
+                    file_id = concat_padded(self.output_file_grp, n)
                 self.workspace.add_file(
                     ID=file_id,
                     file_grp=self.output_file_grp,
-                    basename=file_id + '.xml', # with suffix or bare?
+                    local_filename=os.path.join(self.output_file_grp, file_id + '.xml'),
                     mimetype=MIMETYPE_PAGE,
                     content=to_xml(pcgts),
                 )
@@ -140,15 +153,18 @@ class KerasRate(Processor):
                     page_update_higher_textequiv_levels(level, prev_pcgts)
 
                     # write back result
-                    file_id = concat_padded(self.output_file_grp, n - 1)
+                    file_id = prev_file_id.replace(self.input_file_grp, self.output_file_grp)
+                    if file_id == prev_file_id:
+                        file_id = concat_padded(self.output_file_grp, n - 1)
                     self.workspace.add_file(
                         ID=file_id,
                         file_grp=self.output_file_grp,
-                        basename=file_id + '.xml', # with suffix or bare?
+                        local_filename=os.path.join(self.output_file_grp, file_id + '.xml'),
                         mimetype=MIMETYPE_PAGE,
                         content=to_xml(prev_pcgts),
                     )
-                
+
+                prev_file_id = input_file.ID
                 prev_pcgts = pcgts
                 prev_traceback = traceback
         
@@ -160,11 +176,13 @@ class KerasRate(Processor):
             page_update_higher_textequiv_levels(level, prev_pcgts)
 
             # write back result
-            file_id = concat_padded(self.output_file_grp, n)
+            file_id = input_file.ID.replace(self.input_file_grp, self.output_file_grp)
+            if file_id == input_file.ID:
+                file_id = concat_padded(self.output_file_grp, n)
             self.workspace.add_file(
                 ID=file_id,
                 file_grp=self.output_file_grp,
-                basename=file_id + '.xml', # with suffix or bare?
+                local_filename=os.path.join(self.output_file_grp, file_id + '.xml'),
                 mimetype=MIMETYPE_PAGE,
                 content=to_xml(prev_pcgts),
             )

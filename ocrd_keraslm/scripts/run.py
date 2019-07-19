@@ -8,7 +8,7 @@ from math import ceil
 import json
 import click
 
-from ocrd_keraslm import lib
+from .. import lib
 
 class SortedGroup(click.Group):
     def list_commands(self, ctx):

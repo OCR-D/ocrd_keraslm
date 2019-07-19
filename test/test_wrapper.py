@@ -3,8 +3,9 @@ import shutil
 from unittest import TestCase, main
 
 from ocrd.resolver import Resolver
-from ocrd.model.ocrd_page import from_file, to_xml
-from ocrd import MIMETYPE_PAGE
+from ocrd_models.ocrd_page import to_xml
+from ocrd_modelfactory import page_from_file
+from ocrd_utils import MIMETYPE_PAGE
 from ocrd_tesserocr.recognize import TesserocrRecognize
 from ocrd_keraslm.wrapper import KerasRate
 
@@ -20,8 +21,11 @@ class TestKerasRate(TestCase):
 
     def runTest(self):
         resolver = Resolver()
-        workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/mets.xml', dst_dir=WORKSPACE_DIR, download=True)
+        workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/data/mets.xml', dst_dir=WORKSPACE_DIR, download=True)
         self.assertIsNotNone(workspace)
+        #
+        # rate text alternative 1 on the word level:
+        #
         KerasRate(
             workspace,
             input_file_grp='OCR-D-GT-PAGE', # has wrong tokenisation but that's ok now
@@ -33,36 +37,23 @@ class TestKerasRate(TestCase):
         workspace.save_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-WORD'):
             continue # todo: for some reason, from_file yields NoneType here
-            pcgts = from_file(file)
+            pcgts = page_from_file(file)
             metadata = pcgts.get_Metadata()
             self.assertIsNotNone(metadata)
             metadataitems = metadata.get_MetadataItem()
             self.assertIsNotNone(metadataitems)
             rated = any([i for i in metadataitems if i.get_value() == 'ocrd-keraslm-rate'])
             self.assertTrue(rated)
-        for file in workspace.mets.find_files(fileGrp='OCR-D-GT-PAGE'):
-            grp='OCR-D-GT-SEG-LINE'
-            ID=grp + '_' + file.ID.split(sep='_')[-1]
-            pcgts = from_file(file)
-            page = pcgts.get_Page()
-            for region in page.get_TextRegion():
-                for line in region.get_TextLine():
-                    line.set_TextEquiv([]) # remove text results (interferes with ocrd_tesserocr)
-                    line.set_Word([]) # remove word annotation (interferes with ocrd_tesserocr, has wrong tokenization)
-            self.assertIsNotNone(
-                workspace.add_file(
-                    ID=ID,
-                    file_grp=grp,
-                    basename=ID + '.xml',
-                    mimetype=MIMETYPE_PAGE,
-                    content=to_xml(pcgts)))
+        # 
+        # rate and viterbi-decode all text alternatives on the glyph level:
+        # 
         TesserocrRecognize( # we need this to get alternatives to decode
             workspace,
-            input_file_grp='OCR-D-GT-SEG-LINE',
-            #input_file_grp='OCR-D-GT-PAGE', # only possible with ocrd_tesserocr >= 0.3.0
+            input_file_grp='OCR-D-GT-PAGE', # has wrong tokenisation but that's ok now
             output_file_grp='OCR-D-OCR-TESS-GLYPH',
             parameter={'textequiv_level': 'glyph',
-                       'model': 'deu-frak'}
+                       'overwrite_words': True,
+                       'model': 'deu-frak'} # old model for alternatives
             ).process()
         workspace.save_mets()
         KerasRate(
@@ -77,7 +68,7 @@ class TestKerasRate(TestCase):
         workspace.save_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-GLYPH'):
             continue # todo: for some reason, from_file yields NoneType here
-            pcgts = from_file(file)
+            pcgts = page_from_file(file)
             metadata = pcgts.get_Metadata()
             self.assertIsNotNone(metadata)
             metadataitems = metadata.get_MetadataItem()

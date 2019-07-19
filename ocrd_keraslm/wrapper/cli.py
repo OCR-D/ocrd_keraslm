@@ -1,7 +1,7 @@
 import click
 
 from ocrd.decorators import ocrd_cli_options, ocrd_cli_wrap_processor
-from ocrd_keraslm.wrapper import KerasRate
+from . import KerasRate
 
 @click.command()
 @ocrd_cli_options

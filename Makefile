@@ -39,6 +39,7 @@ test: test/assets
 
 # prepare test assets
 test/assets:
+	# TODO: instead of this, use bag repos, or add something useful to OCR-D/assets
 	test/prepare_gt.bash $@
 
 .PHONY: help deps deps-test install test
