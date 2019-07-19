@@ -64,6 +64,7 @@ class KerasRate(Processor):
         prev_traceback = None
         prev_pcgts = None
         prev_file_id = None
+        prev_page_id = None
         for (n, input_file) in enumerate(self.input_files):
             page_id = input_file.pageId or input_file.ID
             LOG.info("INPUT FILE %i / %s", n, page_id)
@@ -131,6 +132,7 @@ class KerasRate(Processor):
                     file_id = concat_padded(self.output_file_grp, n)
                 self.workspace.add_file(
                     ID=file_id,
+                    pageId=input_file.pageId,
                     file_grp=self.output_file_grp,
                     local_filename=os.path.join(self.output_file_grp, file_id + '.xml'),
                     mimetype=MIMETYPE_PAGE,
@@ -158,12 +160,14 @@ class KerasRate(Processor):
                         file_id = concat_padded(self.output_file_grp, n - 1)
                     self.workspace.add_file(
                         ID=file_id,
+                        pageId=prev_page_id,
                         file_grp=self.output_file_grp,
                         local_filename=os.path.join(self.output_file_grp, file_id + '.xml'),
                         mimetype=MIMETYPE_PAGE,
                         content=to_xml(prev_pcgts),
                     )
 
+                prev_page_id = input_file.pageId
                 prev_file_id = input_file.ID
                 prev_pcgts = pcgts
                 prev_traceback = traceback
@@ -181,6 +185,7 @@ class KerasRate(Processor):
                 file_id = concat_padded(self.output_file_grp, n)
             self.workspace.add_file(
                 ID=file_id,
+                pageId=input_file.pageId,
                 file_grp=self.output_file_grp,
                 local_filename=os.path.join(self.output_file_grp, file_id + '.xml'),
                 mimetype=MIMETYPE_PAGE,
