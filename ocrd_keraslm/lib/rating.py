@@ -820,7 +820,7 @@ class Rater(object):
                     candidate.cum_cost += cost
                     candidate.value += char
                     candidate.state = states[i]
-                    # apply variable length beam treshold:
+                    # apply variable length beam threshold:
                     #if next_beam and candidate.norm_cost >= next_beam[0].norm_cost * 1.002:
                     #if next_beam and candidate.cum_cost >= next_beam[0].cum_cost * 1.002:
                     if next_beam and candidate.cum_cost >= next_beam[0].cum_cost + 2.5:
