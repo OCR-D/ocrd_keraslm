@@ -112,7 +112,7 @@ class KerasRate(Processor):
                         element.set_TextEquiv([textequiv]) # delete others
                     textequiv_len = len(textequiv.Unicode)
                     conf = sum(confidences[i:i+textequiv_len])/textequiv_len # mean probability
-                    conf2 = textequiv.get_conf() or 1.0
+                    conf2 = textequiv.conf
                     textequiv.set_conf(conf * lm_weight + conf2 * (1. - lm_weight))
                     i += textequiv_len
                 if i != len(confidences):
@@ -370,12 +370,20 @@ def _get_edges(graph, start_node):
 
 def _filter_choices(textequivs):
     '''assuming `textequivs` are already sorted by input confidence (conf attribute), ensure maximum number and maximum relative threshold'''
-    textequivs = textequivs[:min(CHOICE_THRESHOLD_NUM, len(textequivs))]
     if textequivs:
+        textequivs = textequivs[:min(CHOICE_THRESHOLD_NUM, len(textequivs))]
+        for te in textequivs:
+            # generateDS does not convert simpleType for attributes (yet?)
+            if te.conf:
+                te.set_conf(float(te.conf))
+            else:
+                te.set_conf(1.0)
         conf0 = textequivs[0].conf
-        if conf0:
-            return [te for te in textequivs if conf0 - te.conf < CHOICE_THRESHOLD_CONF]
-        else:
-            return textequivs
+        return [te for te in textequivs
+                if conf0 - te.conf < CHOICE_THRESHOLD_CONF]
     else:
         return []
+
+def _get_conf(textequiv, default=1.0):
+    '''get float value of conf attribute with default'''
+    return float(textequiv.conf or str(default))
