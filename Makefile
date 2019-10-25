@@ -15,6 +15,7 @@ help:
 	@echo "    test/assets  prepare test assets"
 	@echo ""
 	@echo "  Variables"
+	@echo "    PYTEST_ARGS  pytest args. Set to '-s' to see log output during test execution, '--verbose' to see individual tests. Default: '$(PYTEST_ARGS)'"
 	@echo ""
 
 # END-EVAL
@@ -32,6 +33,7 @@ install:
 	$(PIP) install -e .
 
 # python -m pytest test
+test: export TF_CPP_MIN_LOG_LEVEL = 1
 test: test/assets
 	test -f model_dta_test.h5 || keraslm-rate train -m model_dta_test.h5 test/assets/*.txt
 	keraslm-rate test -m model_dta_test.h5 test/assets/*.txt

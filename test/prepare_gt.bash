@@ -42,23 +42,26 @@ EOF
 for GT_FILE in $GT_FILES; do
     test -f "$CACHE_DIR/${GT_FILE}.zip" ||
         wget -P "$CACHE_DIR" http://www.ocr-d.de/sites/all/GTDaten/${GT_FILE}.zip
-    unzip -jod "$TMP_DIR/$GT_FILE" "$CACHE_DIR/${GT_FILE}.zip"
-    pushd "$TMP_DIR/$GT_FILE"
+    mkdir -p "$TMP_DIR/$GT_FILE"
+    unzip -jod "$TMP_DIR/$GT_FILE/data" "$CACHE_DIR/${GT_FILE}.zip"
+    pushd "$TMP_DIR/$GT_FILE/data"
     ocrd workspace init .
+    mkdir -p OCR-D-IMG OCR-D-GT-PAGE
     ZEROS=0000
     i=0
     for PAGE_FILE in *.xml; do
-		test "x$PAGE_FILE" = xmets.xml && continue
+	test "x$PAGE_FILE" = xmets.xml && continue
         i=$((i+1))
         ID=${ZEROS:0:$((4-${#i}))}$i
         IMG_FILE=$(xsltproc "$TMP_DIR/page-extract-imagefilename.xsl" "$PAGE_FILE")
         test -f "$IMG_FILE"
-        ocrd workspace add -G OCR-D-IMG -i OCR-D-IMG_$ID -g phys_$ID -m image/tiff "$IMG_FILE"
-        ocrd workspace add -G OCR-D-GT-PAGE -i OCR-D-GT-PAGE_$ID -g phys_$ID -m application/vnd.prima.page+xml "$PAGE_FILE"
-		# workaround for OCR-D/core/issues/176 (still true for ocrd v1.0.0b10 !!)
-        sed -i -e "s|imageFilename=\"[^\"]*\"|imageFilename=\"OCR-D-IMG/OCR-D-IMG_$ID\"|" "$PAGE_FILE"
+        mv "$IMG_FILE" OCR-D-IMG/
+        ocrd workspace add -G OCR-D-IMG -i OCR-D-IMG_$ID -g phys_$ID -m image/tiff "OCR-D-IMG/$IMG_FILE"
+	# workaround for OCR-D/core#176 (still true for ocrd v1.0.0)
+        sed -i -e 's|imageFilename="|imageFilename="OCR-D-IMG/|' "$PAGE_FILE"
+        mv "$PAGE_FILE" OCR-D-GT-PAGE/
+        ocrd workspace add -G OCR-D-GT-PAGE -i OCR-D-GT-PAGE_$ID -g phys_$ID -m application/vnd.prima.page+xml "OCR-D-GT-PAGE/$PAGE_FILE"
     done
-	ocrd zip bag -i ${GT_FILE}.zip -D full -Z -I
     popd
 done
 
