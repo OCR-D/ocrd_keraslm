@@ -1,6 +1,7 @@
 # ocrd_keraslm
     character-level language modelling using Keras
 
+[![CircleCI](https://circleci.com/gh/OCR-D/ocrd_keraslm.svg?style=svg)](https://circleci.com/gh/OCR-D/ocrd_keraslm)
 
 ## Introduction
 
