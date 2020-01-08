@@ -10,7 +10,7 @@ help:
 	@echo ""
 	@echo "    deps         pip install -r requirements.txt"
 	@echo "    deps-test    pip install -r requirements_test.txt"
-	@echo "    install      pip install -e ."
+	@echo "    install      pip install ."
 	@echo "    test         python -m pytest test"
 	@echo "    test/assets  prepare test assets"
 	@echo ""
@@ -20,21 +20,17 @@ help:
 
 # END-EVAL
 
-# pip install -r requirements.txt
 deps:
 	$(PIP) install -r requirements.txt
 
-# pip install -r requirements_test.txt
-deps-test:
+deps-test: install
 	$(PIP) install -r requirements_test.txt
 
-# pip install -e .
-install:
-	$(PIP) install -e .
+install: deps
+	$(PIP) install .
 
-# python -m pytest test
-test: export TF_CPP_MIN_LOG_LEVEL = 1
-test: test/assets
+export TF_CPP_MIN_LOG_LEVEL = 1
+test: test/assets deps-test
 	test -f model_dta_test.h5 || keraslm-rate train -m model_dta_test.h5 test/assets/*.txt
 	keraslm-rate test -m model_dta_test.h5 test/assets/*.txt
 	$(PYTHON) -m pytest test $(PYTEST_ARGS)
