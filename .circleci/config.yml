@@ -9,6 +9,14 @@ jobs:
       - checkout
       - run: make deps
       - run: make install
+  test-python3:
+    docker:
+      - image: ocrd/tesserocr
+    steps:
+      - run: apt-get update && apt-get install -y --no-install-recommends make git sed wget unzip xsltproc
+      - checkout
+      - run: make deps
+      - run: make install
       - run: make deps-test
       - run: make test
 
@@ -17,3 +25,4 @@ workflows:
   build-and-test:
     jobs:
       - build-python3
+      - test-python3
