@@ -25,7 +25,17 @@ jobs:
       - run: make install
       - run: wget -nv -O /usr/share/tesseract-ocr/4.00/tessdata/deu-frak.traineddata https://github.com/tesseract-ocr/tessdata/raw/master/deu_frak.traineddata
       - run: make deps-test
+      # restore trained model from previous run
+      # (change name of the key here when model ABI changes)
+      - restore_cache:
+          key: v0.3-model_dta_test
       - run: make test
+      # store trained model for next run
+      # (change name of the key here when model ABI changes)
+      - save_cache:
+          key: v0.3-model_dta_test
+          paths:
+           - model_dta_test.h5
 
 workflows:
   version: 2
