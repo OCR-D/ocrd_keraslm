@@ -1,6 +1,6 @@
 SHELL = /bin/bash
-PYTHON = python
-PIP = pip
+PYTHON ?= python
+PIP ?= pip
 
 # BEGIN-EVAL makefile-parser --make-help Makefile
 
@@ -15,6 +15,8 @@ help:
 	@echo "    test/assets  prepare test assets"
 	@echo ""
 	@echo "  Variables"
+	@echo "    PYTHON       name of the Python binary. Default: $(PYTHON)"
+	@echo "    PIP          name of the Python packager. Default: $(PIP)"
 	@echo "    PYTEST_ARGS  pytest args. Set to '-s' to see log output during test execution, '--verbose' to see individual tests. Default: '$(PYTEST_ARGS)'"
 	@echo ""
 

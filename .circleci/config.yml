@@ -4,6 +4,9 @@ jobs:
   build-python3:
     docker:
       - image: ocrd/core
+    environment:
+      PIP: pip3
+      PYTHON: python3
     steps:
       - run: apt-get update && apt-get install -y --no-install-recommends make git
       - checkout
@@ -12,6 +15,9 @@ jobs:
   test-python3:
     docker:
       - image: ocrd/tesserocr
+    environment:
+      PIP: pip3
+      PYTHON: python3
     steps:
       - run: apt-get update && apt-get install -y --no-install-recommends make git sed wget unzip xsltproc
       - checkout
