@@ -23,6 +23,7 @@ jobs:
       - checkout
       - run: make deps
       - run: make install
+      - run: wget -nv -O /usr/share/tesseract-ocr/4.00/tessdata/deu-frak.traineddata https://github.com/tesseract-ocr/tessdata/raw/master/deu_frak.traineddata
       - run: make deps-test
       - run: make test
 
