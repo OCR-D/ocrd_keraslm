@@ -17,19 +17,13 @@ class TestKerasRate(TestCase):
     def setUp(self):
         if os.path.exists(WORKSPACE_DIR):
             shutil.rmtree(WORKSPACE_DIR)
-        #os.makedirs(WORKSPACE_DIR)
-        shutil.copytree('test/assets/', WORKSPACE_DIR)
+        os.makedirs(WORKSPACE_DIR)
 
     def runTest(self):
         resolver = Resolver()
-        # workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/data/mets.xml',
-        #                                         dst_dir=WORKSPACE_DIR, download=True)
-        # self.assertIsNotNone(workspace)
-        # workaround for OCR-D/core#319:
-        workspace = resolver.workspace_from_url(WORKSPACE_DIR + '/kant_aufklaerung_1784/data/mets.xml')
+        workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/data/mets.xml',
+                                                dst_dir=WORKSPACE_DIR, download=True)
         self.assertIsNotNone(workspace)
-        for file_ in workspace.mets.find_files(fileGrp='OCR-D-GT-PAGE'):
-            workspace.download_file(file_)
         #
         # rate text alternative 1 on the word level:
         #
