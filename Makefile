@@ -25,7 +25,7 @@ help:
 deps:
 	$(PIP) install -r requirements.txt
 
-deps-test: install
+deps-test:
 	$(PIP) install -r requirements_test.txt
 
 install: deps

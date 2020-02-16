@@ -1,7 +1,7 @@
 ocrd >= 2.3.1
 click
-keras >= 2.2.4
+keras >= 2.3.1
 numpy
-tensorflow < 2.0
+tensorflow == 1.15.2
 h5py
 networkx >= 2.0
