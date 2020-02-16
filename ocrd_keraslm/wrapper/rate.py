@@ -314,7 +314,7 @@ def _page_get_tokenisation_problems(level, pcgts):
     # as a minor mitigation, try to guess consistency a text annotation on multiple levels
     # (i.e. infer wrong tokenisation when mother node has TextEquiv deviating from
     #  concatenated child node TextEquivs only w.r.t. white-space):
-    report = PageValidator.validate(ocrd_page=pcgts, strictness='strict')
+    report = PageValidator.validate(ocrd_page=pcgts, page_textequiv_consistency='strict')
     problems = {}
     if not report.is_valid:
         LOG.warning("Page validation failed: %s", report.to_xml())

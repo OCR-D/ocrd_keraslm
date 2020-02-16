@@ -21,7 +21,7 @@ setup(
     author_email='sachunsky@informatik.uni-leipzig.de, unixprog@gmail.com, wuerzner@gmail.com',
     url='https://github.com/OCR-D/ocrd_keraslm',
     license='Apache License 2.0',
-    packages=find_packages(exclude=('tests', 'docs')),
+    packages=find_packages(exclude=('test', 'repo', 'build')),
     install_requires=open('requirements.txt').read().split('\n'),
     extras_require={
         'plotting': [
@@ -32,6 +32,7 @@ setup(
     package_data={
         '': ['*.json', '*.yml', '*.yaml'],
     },
+    include_package_data=True,
     entry_points={
         'console_scripts': [
             'keraslm-rate=ocrd_keraslm.scripts.run:cli',
