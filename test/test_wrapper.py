@@ -21,7 +21,7 @@ class TestKerasRate(TestCase):
 
     def runTest(self):
         resolver = Resolver()
-        workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/data/mets.xml',
+        workspace = resolver.workspace_from_url('test/assets/kant_aufklaerung_1784/mets.xml',
                                                 dst_dir=WORKSPACE_DIR, download=True)
         self.assertIsNotNone(workspace)
         #

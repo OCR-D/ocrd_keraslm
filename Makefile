@@ -38,8 +38,16 @@ test: test/assets deps-test
 	$(PYTHON) -m pytest test $(PYTEST_ARGS)
 
 # prepare test assets
-test/assets:
-	# TODO: instead of this, use bag repos, or add something useful to OCR-D/assets
-	test/prepare_gt.bash $@
+test/assets: repo/assets
+	mkdir -p $@
+	ocrd workspace clone $</data/kant_aufklaerung_1784/data/mets.xml -a $@/kant_aufklaerung_1784
+	bash test/prepare_gt.bash $@
 
-.PHONY: help deps deps-test install test
+repo/assets: always-update
+	git submodule sync $@
+	git submodule update --init $@
+
+clean:
+	$(RM) -r test/assets model_dta_test.h5
+
+.PHONY: help deps deps-test install test clean always-update
