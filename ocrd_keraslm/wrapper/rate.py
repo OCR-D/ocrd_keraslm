@@ -5,15 +5,16 @@ from math import log, ceil
 from ocrd import Processor
 from ocrd_validators.page_validator import PageValidator, ConsistencyError
 from ocrd_utils import (
-    getLogger, concat_padded,
-    xywh_from_points, points_from_xywh,
+    getLogger,
+    make_file_id,
+    assert_file_grp_cardinality,
     MIMETYPE_PAGE
 )
 from ocrd_modelfactory import page_from_file
 from ocrd_models.ocrd_page import (
-    to_xml, GlyphType,
+    to_xml,
     MetadataItemType, LabelsType, LabelType,
-    CoordsType, TextEquivType
+    TextEquivType
 )
 
 import networkx as nx
@@ -57,14 +58,16 @@ class KerasRate(Processor):
         
         ... explain incremental page-wise processing here ...
         """
+        assert_file_grp_cardinality(self.input_file_grp, 1)
+        assert_file_grp_cardinality(self.output_file_grp, 1)
+
         level = self.parameter['textequiv_level']
         beam_width = self.parameter['beam_width']
         lm_weight = self.parameter['lm_weight']
 
         prev_traceback = None
         prev_pcgts = None
-        prev_file_id = None
-        prev_page_id = None
+        prev_file = None
         for (n, input_file) in enumerate(self.input_files):
             page_id = input_file.pageId or input_file.ID
             LOG.info("INPUT FILE %i / %s", n, page_id)
@@ -127,9 +130,7 @@ class KerasRate(Processor):
                 page_update_higher_textequiv_levels(level, pcgts)
             
                 # write back result
-                file_id = input_file.ID.replace(self.input_file_grp, self.output_file_grp)
-                if file_id == input_file.ID:
-                    file_id = concat_padded(self.output_file_grp, n)
+                file_id = make_file_id(input_file, self.output_file_grp)
                 self.workspace.add_file(
                     ID=file_id,
                     pageId=input_file.pageId,
@@ -155,20 +156,17 @@ class KerasRate(Processor):
                     page_update_higher_textequiv_levels(level, prev_pcgts)
 
                     # write back result
-                    file_id = prev_file_id.replace(self.input_file_grp, self.output_file_grp)
-                    if file_id == prev_file_id:
-                        file_id = concat_padded(self.output_file_grp, n - 1)
+                    file_id = make_file_id(prev_file, self.output_file_grp)
                     self.workspace.add_file(
                         ID=file_id,
-                        pageId=prev_page_id,
+                        pageId=prev_file.pageId,
                         file_grp=self.output_file_grp,
                         local_filename=os.path.join(self.output_file_grp, file_id + '.xml'),
                         mimetype=MIMETYPE_PAGE,
                         content=to_xml(prev_pcgts),
                     )
 
-                prev_page_id = input_file.pageId
-                prev_file_id = input_file.ID
+                prev_file = input_file
                 prev_pcgts = pcgts
                 prev_traceback = traceback
         
@@ -180,9 +178,7 @@ class KerasRate(Processor):
             page_update_higher_textequiv_levels(level, prev_pcgts)
 
             # write back result
-            file_id = input_file.ID.replace(self.input_file_grp, self.output_file_grp)
-            if file_id == input_file.ID:
-                file_id = concat_padded(self.output_file_grp, n)
+            file_id = make_file_id(input_file, self.output_file_grp)
             self.workspace.add_file(
                 ID=file_id,
                 pageId=input_file.pageId,

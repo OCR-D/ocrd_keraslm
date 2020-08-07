@@ -9,3 +9,4 @@ TAGS
 .pytest_cache/
 env/
 env3/
+test/assets
