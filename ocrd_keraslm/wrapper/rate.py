@@ -131,6 +131,7 @@ class KerasRate(Processor):
             
                 # write back result
                 file_id = make_file_id(input_file, self.output_file_grp)
+                pcgts.set_pcGtsId(file_id)
                 self.workspace.add_file(
                     ID=file_id,
                     pageId=input_file.pageId,
@@ -157,6 +158,7 @@ class KerasRate(Processor):
 
                     # write back result
                     file_id = make_file_id(prev_file, self.output_file_grp)
+                    prev_pcgts.set_pcGtsId(file_id)
                     self.workspace.add_file(
                         ID=file_id,
                         pageId=prev_file.pageId,
@@ -179,6 +181,7 @@ class KerasRate(Processor):
 
             # write back result
             file_id = make_file_id(input_file, self.output_file_grp)
+            prev_pcgts.set_pcGtsId(file_id)
             self.workspace.add_file(
                 ID=file_id,
                 pageId=input_file.pageId,
