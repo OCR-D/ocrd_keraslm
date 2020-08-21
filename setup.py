@@ -5,15 +5,18 @@ Installs:
     - ocrd-keraslm-rate
 """
 import codecs
+import json
 
 from setuptools import setup, find_packages
 
 with codecs.open('README.md', encoding='utf-8') as f:
     README = f.read()
+with open('ocrd-tool.json', 'r') as f:
+    version = json.load(f)['version']
 
 setup(
     name='ocrd_keraslm',
-    version='0.3.2',
+    version=version,
     description='character-level language modelling in Keras',
     long_description=README,
     long_description_content_type='text/markdown',

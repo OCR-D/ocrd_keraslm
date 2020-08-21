@@ -10,3 +10,5 @@ TAGS
 env/
 env3/
 test/assets
+/build
+/dist
