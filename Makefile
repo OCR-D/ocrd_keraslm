@@ -40,7 +40,7 @@ test: test/assets deps-test
 # prepare test assets
 test/assets: repo/assets
 	mkdir -p $@
-	ocrd workspace clone $</data/kant_aufklaerung_1784/data/mets.xml -a $@/kant_aufklaerung_1784
+	ocrd workspace -d $@/kant_aufklaerung_1784 clone $</data/kant_aufklaerung_1784/data/mets.xml --download
 	bash test/prepare_gt.bash $@
 
 repo/assets: always-update
