@@ -22,8 +22,6 @@ import networkx as nx
 from .config import OCRD_TOOL
 from .. import lib
 
-LOG = getLogger('processor.KerasRate')
-
 CHOICE_THRESHOLD_NUM = 4 # maximum number of choices to try per element
 CHOICE_THRESHOLD_CONF = 0.1 # maximum score drop from best choice to try per element
 #beam_width = 100 # maximum number of best partial paths to consider during search with alternative_decoding
@@ -42,6 +40,7 @@ class KerasRate(Processor):
         if not hasattr(self, 'workspace') or not self.workspace: # no parameter/workspace for --dump-json or --version (no processing)
             return
         
+        LOG = getLogger('processor.KerasRate')
         self.rater = lib.Rater(logger=LOG)
         self.rater.load_config(self.parameter['model_file'])
         # overrides necessary before compilation:
@@ -58,6 +57,7 @@ class KerasRate(Processor):
         
         ... explain incremental page-wise processing here ...
         """
+        LOG = getLogger('processor.KerasRate')
         assert_file_grp_cardinality(self.input_file_grp, 1)
         assert_file_grp_cardinality(self.output_file_grp, 1)
 
@@ -192,6 +192,7 @@ class KerasRate(Processor):
             )
 
 def page_get_linear_graph_at(level, pcgts):
+    LOG = getLogger('processor.KerasRate')
     problems = _page_get_tokenisation_problems(level, pcgts)
     
     graph = nx.DiGraph(level=level) # initialise directed unigraph
@@ -270,6 +271,7 @@ def page_get_linear_graph_at(level, pcgts):
     return graph, page_start_node, start_node
 
 def _page_update_from_path(level, path, entropy):
+    LOG = getLogger('processor.KerasRate')
     strlen = 0
     for element, textequiv, score in path:
         if element: # not just space
@@ -291,6 +293,7 @@ def page_update_higher_textequiv_levels(level, pcgts):
     join all first TextEquiv (by the rules governing the respective level)
     into TextEquiv of the next higher level, replacing them.
     '''
+    LOG = getLogger('processor.KerasRate')
     regions = pcgts.get_Page().get_TextRegion()
     if level != 'region':
         for region in regions:
@@ -309,6 +312,7 @@ def page_update_higher_textequiv_levels(level, pcgts):
             region.set_TextEquiv([TextEquivType(Unicode=region_unicode)]) # remove old
 
 def _page_get_tokenisation_problems(level, pcgts):
+    LOG = getLogger('processor.KerasRate')
     # white space IFF between words, newline IFF between lines/regions: required for LM input
     # as a minor mitigation, try to guess consistency a text annotation on multiple levels
     # (i.e. infer wrong tokenisation when mother node has TextEquiv deviating from
@@ -353,6 +357,7 @@ def _add_space(graph, start_node, space, last_start_node, problem, textequivs):
     return start_node
 
 def _repair_tokenisation(tokenisation, concatenation, next_token):
+    LOG = getLogger('processor.KerasRate')
     # invariant: text should contain a representation that concatenates into actual tokenisation
     # ideally, both overlap (concatenation~tokenisation)
     i = 0
