@@ -170,7 +170,7 @@ Examples:
 ```shell
 make deps-test # installs ocrd_tesserocr
 make test/assets # downloads GT, imports PageXML, builds workspaces
-ocrd workspace clone -a test/assets/kant_aufklaerung_1784/mets.xml ws1
+ocrd workspace -d ws1 clone -a test/assets/kant_aufklaerung_1784/mets.xml
 cd ws1
 ocrd-tesserocr-segment-region -I OCR-D-IMG -O OCR-D-SEG-BLOCK
 ocrd-tesserocr-segment-line -I OCR-D-SEG-BLOCK -O OCR-D-SEG-LINE
