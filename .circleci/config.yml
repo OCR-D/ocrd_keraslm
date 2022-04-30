@@ -23,7 +23,7 @@ jobs:
       - checkout
       - run: make deps
       - run: make install
-      - run: wget -nv -O /usr/share/tesseract-ocr/4.00/tessdata/deu-frak.traineddata https://github.com/tesseract-ocr/tessdata/raw/4.1.0/deu_frak.traineddata
+      - run: wget -nv -O /usr/local/share/ocrd-resources/ocrd-tesserocr-recognize/deu-frak.traineddata https://github.com/tesseract-ocr/tessdata/raw/4.1.0/deu_frak.traineddata
       - run: make deps-test
       # restore trained model from previous run
       # (change name of the key here when model ABI changes)
