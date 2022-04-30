@@ -52,7 +52,7 @@ class TestKerasRate(TestCase):
             input_file_grp='OCR-D-GT-PAGE', # has wrong tokenisation but that's ok now
             output_file_grp='OCR-D-OCR-TESS-GLYPH',
             parameter={'textequiv_level': 'glyph',
-                       'overwrite_words': True,
+                       'overwrite_segments': True,
                        'model': 'deu-frak'} # old model for alternatives
             ).process()
         workspace.save_mets()
