@@ -4,6 +4,10 @@ Versioned according to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+Changed:
+
+  * update tests and assets to recent OCR-D changes
+
 ## [0.4.1] - 2020-09-24
 
 Changed:
