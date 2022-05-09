@@ -19,11 +19,14 @@ jobs:
       PIP: pip3
       PYTHON: python3
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends make git sed wget unzip xsltproc
+      - run: apt-get update && apt-get install -y --no-install-recommends make git sed
+          wget unzip xsltproc
       - checkout
       - run: make deps
       - run: make install
-      - run: wget -nv -O /usr/local/share/ocrd-resources/ocrd-tesserocr-recognize/deu-frak.traineddata https://github.com/tesseract-ocr/tessdata/raw/4.1.0/deu_frak.traineddata
+      - run: wget -nv -O
+          /usr/local/share/ocrd-resources/ocrd-tesserocr-recognize/deu-frak.traineddata
+          https://github.com/tesseract-ocr/tessdata/raw/4.1.0/deu_frak.traineddata
       - run: make deps-test
       # restore trained model from previous run
       # (change name of the key here when model ABI changes)
@@ -35,7 +38,9 @@ jobs:
       - save_cache:
           key: v0.3-model_dta_test
           paths:
-           - model_dta_test.h5
+            - model_dta_test.h5
+    # The resource_class feature allows configuring CPU and RAM resources for each job. Different resource classes are available for different executors. https://circleci.com/docs/2.0/configuration-reference/#resourceclass
+    resource_class: large
 
 workflows:
   version: 2
