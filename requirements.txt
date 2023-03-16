@@ -1,6 +1,6 @@
 ocrd >= 2.13.1
 keras == 2.3.*
-numpy
+numpy < 1.21
 tensorflow-gpu == 1.15.*
-h5py
+h5py ~= 2.10
 networkx >= 2.0
