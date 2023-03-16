@@ -10,6 +10,7 @@ jobs:
     steps:
       - run: apt-get update && apt-get install -y --no-install-recommends make git
       - checkout
+      - run: make nvidia-tensorflow
       - run: make deps
       - run: make install
   test-python3:
@@ -22,6 +23,7 @@ jobs:
       - run: apt-get update && apt-get install -y --no-install-recommends make git sed
           wget unzip xsltproc
       - checkout
+      - run: make nvidia-tensorflow
       - run: make deps
       - run: make install
       - run: wget -nv -O
