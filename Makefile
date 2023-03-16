@@ -28,6 +28,24 @@ deps:
 deps-test:
 	$(PIP) install -r requirements_test.txt
 
+nvidia-tensorflow:
+	if $(PYTHON) -c 'import sys; print("%u.%u" % (sys.version_info.major, sys.version_info.minor))' | fgrep 3.8 && \
+	! pip show -q tensorflow-gpu; then \
+	  pip install nvidia-pyindex && \
+	  pushd $$(mktemp -d) && \
+	  pip download --no-deps nvidia-tensorflow && \
+	  for name in nvidia_tensorflow-*.whl; do name=$${name%.whl}; done && \
+	  $(PYTHON) -m wheel unpack $$name.whl && \
+	  for name in nvidia_tensorflow-*/; do name=$${name%/}; done && \
+	  newname=$${name/nvidia_tensorflow/tensorflow_gpu} &&\
+	  sed -i s/nvidia_tensorflow/tensorflow_gpu/g $$name/$$name.dist-info/METADATA && \
+	  sed -i s/nvidia_tensorflow/tensorflow_gpu/g $$name/$$name.dist-info/RECORD && \
+	  sed -i s/nvidia_tensorflow/tensorflow_gpu/g $$name/tensorflow_core/tools/pip_package/setup.py && \
+	  pushd $$name && for path in $$name*; do mv $$path $${path/$$name/$$newname}; done && popd && \
+	  $(PYTHON) -m wheel pack $$name && \
+	  pip install $$newname*.whl && popd && rm -fr $$OLDPWD; \
+	fi
+
 install: deps
 	$(PIP) install .
 
@@ -50,4 +68,4 @@ repo/assets: always-update
 clean:
 	$(RM) -r test/assets model_dta_test.h5
 
-.PHONY: help deps deps-test install test clean always-update
+.PHONY: help deps deps-test install test clean always-update nvidia-tensorflow
