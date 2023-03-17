@@ -9,8 +9,8 @@ help:
 	@echo "  Targets"
 	@echo ""
 	@echo "    deps         pip install -r requirements.txt"
-	@echo "    deps-test    pip install -r requirements_test.txt"
 	@echo "    install      pip install ."
+	@echo "    deps-test    pip install -r requirements_test.txt"
 	@echo "    test         python -m pytest test"
 	@echo "    test/assets  prepare test assets"
 	@echo ""
@@ -46,11 +46,11 @@ nvidia-tensorflow:
 	  pip install $$newname*.whl && popd && rm -fr $$OLDPWD; \
 	fi
 
-install: deps
+install:
 	$(PIP) install .
 
 export TF_CPP_MIN_LOG_LEVEL = 1
-test: test/assets deps-test
+test: test/assets
 	test -f model_dta_test.h5 || keraslm-rate train -m model_dta_test.h5 test/assets/*.txt
 	keraslm-rate test -m model_dta_test.h5 test/assets/*.txt
 	$(PYTHON) -m pytest test $(PYTEST_ARGS)
