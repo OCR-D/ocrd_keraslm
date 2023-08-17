@@ -604,7 +604,7 @@ class Rater(object):
         # for batch processing, all hypotheses must be passed together:
         for i, initial_state in enumerate(initial_states):
             if not initial_state:
-                initial_states[i] = [np.zeros((self.width), dtype=np.float) for n in range(0, self.depth*2)] # h+c per layer
+                initial_states[i] = [np.zeros((self.width), dtype=float) for n in range(0, self.depth*2)] # h+c per layer
         states_inputs = [np.vstack([initial_state[layer] for initial_state in initial_states])
                          for layer in range(0, self.depth*2)] # stack layers across batch (h+c per layer)
         
@@ -1080,9 +1080,9 @@ class Rater(object):
         # vectorization
         x = np.zeros((batch_size, length), dtype=np.uint32)
         if self.stateful:
-            y = np.zeros((batch_size, length, self.voc_size), dtype=np.bool)
+            y = np.zeros((batch_size, length, self.voc_size), dtype=bool)
         else:
-            y = np.zeros((batch_size, self.voc_size), dtype=np.bool)
+            y = np.zeros((batch_size, self.voc_size), dtype=bool)
         zs = [np.zeros((batch_size, length), dtype=np.uint32) for _ in contexts]
         for i, sequence in enumerate(inputs):
             assert i < batch_size, 'input sequence %d (%s) exceeds batch size' % (i, sequence)
