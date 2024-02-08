@@ -38,7 +38,10 @@ class Rater(object):
         self.width = 0 # number of LSTM cells per hidden layer
         self.depth = 0 # number of LSTM hidden layers
         self.length = 0 # number of backpropagation timesteps per LSTM cell
-        self.variable_length = True # also train on partially filled windows
+        self.variable_length = True # train/predict without zero padding if stateless
+        self.first_window = 0.1 # ratio of augmented (additional) partially filled windows during training if stateless
+        self.char_degradation = 0.01 # ratio of degraded (underspecified) characters during training
+        self.context_degradation = 0.1 # ratio of degraded (underspecified) context seqs during training
         self.stateful = True # keep states across batches within one text (implicit state transfer)
         self.mapping = ({}, {}) # indexation of (known/allowed) input and output characters (i.e. vocabulary)
         # configuration constants
@@ -71,7 +74,7 @@ class Rater(object):
         length = None if self.variable_length else self.length
         # automatically switch to CuDNNLSTM if CUDA GPU is available:
         has_cuda = K.backend() == 'tensorflow' and K.tensorflow_backend._get_available_gpus()
-        self.logger.info('using %s LSTM implementation to compile %s %s model of depth %d width %s length %d size %d',
+        self.logger.info('using %s LSTM implementation to compile %s %s model of depth %d width %d length %s size %d',
                          'GPU' if has_cuda else 'CPU',
                          'stateful' if self.stateful else 'stateless',
                          'incremental' if self.incremental else 'contiguous',
@@ -360,8 +363,8 @@ class Rater(object):
                 validation_epoch_size = ceil(epoch_size*self.validation_split)
                 validation_data, training_data = data, data # same data, different generators (see below)
                 split = np.random.uniform(0, 1, (ceil(max_size/steps),)) # reserve split fraction at random positions
-            if self.variable_length:
-                training_epoch_size *= 1.1 # training data augmented with partial windows (1+subsampling ratio)
+            if self.first_window:
+                training_epoch_size *= 1.0 + self.first_window # training data augmented with partial windows (1+subsampling ratio)
         chars = sorted(list(chars))
         self.voc_size = len(chars) + 1 # reserve 0 for padding
         c_i = dict((c, i) for i, c in enumerate(chars, 1))
@@ -998,6 +1001,7 @@ class Rater(object):
         sequences = []
         next_chars = []
         i = 0
+        assert size > self.length
         for i in range(self.length if self.stateful else 0, size, steps):
             if isinstance(split, np.ndarray):
                 if (split[int(i/steps)] < self.validation_split) == train:
@@ -1010,14 +1014,12 @@ class Rater(object):
             # make windows:
             if i < self.length:
                 if train:
-                    if self.variable_length:
-                        # below, vectorize() will do zero right-padding (suboptimal)
-                        sequences.append(text[0:i])
-                    else:
-                        continue
+                    sequences.append(text[0:i])
                 else:
                     # partial window (needs interim batch size 1 for interim length i):
-                    yield self._vectorize([text[0:i]], [text[i]], context, length=i, batch_size=1)
+                    yield self._vectorize([text[0:i]], [text[i]], context,
+                                          length=i if self.variable_length else self.length,
+                                          batch_size=1)
                     continue
             else:
                 sequences.append(text[i - self.length: i])
@@ -1025,44 +1027,52 @@ class Rater(object):
                 next_chars.append(text[i+1 - self.length: i+1])
             else:
                 next_chars.append(text[i])
-            if (len(sequences) % self.batch_size == 0 or # next full batch or
-                i + steps >= size): # last (partially filled) batch?
+            if len(sequences) % self.batch_size == 0: # next full batch
                 x, y = self._vectorize(sequences, next_chars, context)
+                yield x, y
+                sequences = []
+                next_chars = []
                 # also train for unmapped characters by random degradation,
                 #         or for partial windows by random subsampling:
                 if train:
                     # zero degradation for character underspecification:
-                    rand_max = 0.01 # effective character degradation ratio
-                    if rand < rand_max:
+                    rand_max = self.char_degradation
+                    if 0 < rand < rand_max:
                         j = int((self.length-1) * rand / rand_max) # random position in window
-                        x[0][:, j] = 0
+                        xaug = [np.copy(z) for z in x]
+                        xaug[0][:, j] = 0
+                        yield xaug, y
                     # zero degradation for context underspecification:
                     rand = (rand - rand_max) / (1 - rand_max) # re-use rest of random number
-                    rand_max = 0.1 # effective context degradation ratio
-                    if rand < rand_max:
+                    rand_max = self.context_degradation
+                    if 0 < rand < rand_max:
                         j = int((len(x) - 1) * rand / rand_max) + 1 # random context
-                        x[j][:, :] = 0
+                        xaug = [np.copy(z) for z in x]
+                        xaug[j][:, :] = 0
+                        yield xaug, y
                     rand = (rand - rand_max) / (1 - rand_max) # re-use rest of random number
-                    if self.variable_length:
-                        rand_max = 0.1 # effective subsampling ratio
-                        if rand < rand_max:
-                            j = int((self.length-1) * rand / rand_max) + 1 # random length
-                            # erase complete batch by sublength from the left ...
-                            # to simulate running in with zero padding as in rate():
-                            # x[0][:, 0:j] = 0
-                            # yield (x, y)
+                    rand_max = self.first_window
+                    if 0 < rand < rand_max:
+                        j = int((self.length-1) * rand / rand_max) + 1 # random length
+                        if self.variable_length:
                             # shorten complete batch to sublength from the right ...
                             # to simulate running in with short sequences in rate():
                             yield [z[:, -j:] for z in x], y
-                        rand = (rand - rand_max) / (1 - rand_max) # re-use rest of random number
-                yield x, y
-                sequences = []
-                next_chars = []
-        if i + steps >= size and steps > 1: # last batch: 1 sample with partial length
+                        else:
+                            # erase complete batch by sublength from the left ...
+                            # to simulate running in with zero padding as in rate2():
+                            xaug = [np.copy(z) for z in x]
+                            xaug[0][:, 0:j] = 0
+                            yield xaug, y
+        if len(sequences): # remaining samples
+            yield self._vectorize(sequences, next_chars, context, batch_size=len(sequences))
+            sequences = []
+            next_chars = []
+        if i + 1 < size: # last batch: 1 sample with partial length
             if self.stateful:
                 next_chars.append(text[i+1: size])
             else:
-                next_chars.append(text[i+steps])
+                next_chars.append(text[size-1])
             sequences.append(text[i: size-1])
             yield self._vectorize(sequences, next_chars, context, batch_size=1) # length=size-i-1 crashes predict_generator in stateful mode (return_sequences)
     
@@ -1100,6 +1110,9 @@ class Rater(object):
                     idx = 0
                 else:
                     idx = self.mapping[0][char]
+                # this will zero-pad from the left as in rate2; but we should apply everywhere if at all
+                # if not self.stateful and not self.variable_length and len(sequence) < length:
+                #     j += length - len(sequence)
                 x[i, j] = idx
                 for z, idx in zip(zs, contexts):
                     z[i, j] = idx
