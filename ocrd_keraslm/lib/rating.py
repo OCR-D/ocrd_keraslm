@@ -65,15 +65,19 @@ class Rater(object):
         from keras import backend as K
         
         if self.stateful:
-            self.variable_length = False # (to avoid inconsistency)
+            # (to avoid inconsistency)
+            self.variable_length = False
+            self.first_window = 0
         length = None if self.variable_length else self.length
         # automatically switch to CuDNNLSTM if CUDA GPU is available:
         has_cuda = K.backend() == 'tensorflow' and K.tensorflow_backend._get_available_gpus()
-        self.logger.info('using %s LSTM implementation to compile %s %s model of depth %d width %d length %d size %d',
+        self.logger.info('using %s LSTM implementation to compile %s %s model of depth %d width %s length %d size %d',
                          'GPU' if has_cuda else 'CPU',
                          'stateful' if self.stateful else 'stateless',
                          'incremental' if self.incremental else 'contiguous',
-                         self.depth, self.width, self.length, self.voc_size)
+                         self.depth, self.width,
+                         'variable' if self.variable_length else str(self.length),
+                         self.voc_size)
         lstm = CuDNNLSTM if has_cuda else LSTM
         
         # batch size and window length:
@@ -1055,7 +1059,10 @@ class Rater(object):
                 sequences = []
                 next_chars = []
         if i + steps >= size and steps > 1: # last batch: 1 sample with partial length
-            next_chars.append(text[i+1: size])
+            if self.stateful:
+                next_chars.append(text[i+1: size])
+            else:
+                next_chars.append(text[i+steps])
             sequences.append(text[i: size-1])
             yield self._vectorize(sequences, next_chars, context, batch_size=1) # length=size-i-1 crashes predict_generator in stateful mode (return_sequences)
     
