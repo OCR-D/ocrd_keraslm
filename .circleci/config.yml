@@ -8,7 +8,7 @@ jobs:
       PIP: pip3
       PYTHON: python3
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends make git
+      - run: apt-get update && apt-get install -y --no-install-recommends ssh
       - checkout
       - run: make nvidia-tensorflow
       - run: make deps
@@ -19,9 +19,10 @@ jobs:
     environment:
       PIP: pip3
       PYTHON: python3
+      # as long as ocrd/tesserocr is built with Tesseract from PPA (but does not export this variable):
+      TESSDATA_PREFIX: /usr/share/tesseract-ocr/4.00/tessdata
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends make git sed
-          wget unzip xsltproc
+      - run: apt-get update && apt-get install -y --no-install-recommends make wget unzip xsltproc
       - checkout
       - run: make nvidia-tensorflow
       - run: make deps
@@ -34,7 +35,9 @@ jobs:
       # (change name of the key here when model ABI changes)
       - restore_cache:
           key: v0.3-model_dta_test
-      - run: make test
+      - run: make test |& tee test.log
+      - store_test_results:
+          path: test.log
       # store trained model for next run
       # (change name of the key here when model ABI changes)
       - save_cache:
