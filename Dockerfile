@@ -9,18 +9,19 @@ LABEL \
 
 SHELL ["/bin/bash", "-c"]
 WORKDIR /build
+
+COPY setup.py .
+COPY ocrd-tool.json .
+COPY ocrd_keraslm ./ocrd_keraslm
+COPY Makefile .
+COPY requirements.txt .
+COPY README.md .
 RUN make nvidia-tensorflow
 # - preempt conflict over numpy between scikit-image and tensorflow
 # - preempt conflict over numpy between tifffile and tensorflow (and allow py36)
 RUN pip install imageio==2.14.1 "tifffile<2022"
 # - preempt conflict over numpy between h5py and tensorflow
 RUN pip install "numpy<1.24"
-
-COPY setup.py .
-COPY ocrd-tool.json .
-COPY ocrd_keraslm ./ocrd_keraslm
-COPY requirements.txt .
-COPY README.md .
 RUN pip install .
 RUN rm -fr /build
 
