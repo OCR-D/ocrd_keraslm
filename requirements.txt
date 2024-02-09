@@ -2,8 +2,8 @@ ocrd >= 2.13.1
 keras == 2.3.*
 # for tensorflow-gpu==1.15 nv (py37+py38), we need < 1.24, >= 1.22 
 # for tensorflow-gpu==1.15 from PyPI (py36+py37), we need < 1.19
-# (so try and keep underspecified)
-numpy
+# (but 3.7 is gone now, so hold at 1.23)
+numpy < 1.24 # numpy 1.24 incompatible with h5py 2.x
 tensorflow-gpu == 1.15.*
 # needed after https://protobuf.dev/news/2022-05-06/#python-updates
 protobuf < 4.21

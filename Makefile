@@ -1,6 +1,7 @@
 SHELL = /bin/bash
 PYTHON ?= python
 PIP ?= pip
+TAG ?= ocrd/keraslm
 
 # BEGIN-EVAL makefile-parser --make-help Makefile
 
@@ -13,10 +14,12 @@ help:
 	@echo "    deps-test    pip install -r requirements_test.txt"
 	@echo "    test         python -m pytest test"
 	@echo "    test/assets  prepare test assets"
+	@echo "    docker       build Docker image"
 	@echo ""
 	@echo "  Variables"
 	@echo "    PYTHON       name of the Python binary. Default: $(PYTHON)"
 	@echo "    PIP          name of the Python packager. Default: $(PIP)"
+	@echo "    TAG          name of the Docker image. Default: $(TAG)"
 	@echo "    PYTEST_ARGS  pytest args. Set to '-s' to see log output during test execution, '--verbose' to see individual tests. Default: '$(PYTEST_ARGS)'"
 	@echo ""
 
@@ -48,6 +51,12 @@ nvidia-tensorflow:
 
 install:
 	$(PIP) install .
+
+docker:
+	docker build \
+	-t $(TAG) \
+	--build-arg VCS_REF=$(git rev-parse --short HEAD) \
+	--build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") .
 
 export TF_CPP_MIN_LOG_LEVEL = 1
 test: test/assets
