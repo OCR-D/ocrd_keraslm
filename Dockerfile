@@ -9,19 +9,7 @@ LABEL \
 
 SHELL ["/bin/bash", "-c"]
 WORKDIR /build
-RUN pip install nvidia-pyindex && \
-    pushd $(mktemp -d) && \
-    pip download --no-deps "nvidia-tensorflow==1.15.5+nv22.12" && \
-    for name in nvidia_tensorflow-*.whl; do name=${name%.whl}; done && \
-        python -m wheel unpack $name.whl && \
-        for name in nvidia_tensorflow-*/; do name=${name%/}; done && \
-        newname=${name/nvidia_tensorflow/tensorflow_gpu} &&\
-        sed -i s/nvidia_tensorflow/tensorflow_gpu/g $name/$name.dist-info/METADATA && \
-        sed -i s/nvidia_tensorflow/tensorflow_gpu/g $name/$name.dist-info/RECORD && \
-        sed -i s/nvidia_tensorflow/tensorflow_gpu/g $name/tensorflow_core/tools/pip_package/setup.py && \
-        pushd $name && for path in $name*; do mv $path ${path/$name/$newname}; done && popd && \
-        python -m wheel pack $name && \
-        pip install $newname*.whl && popd && rm -fr $OLDPWD
+RUN make nvidia-tensorflow
 # - preempt conflict over numpy between scikit-image and tensorflow
 # - preempt conflict over numpy between tifffile and tensorflow (and allow py36)
 RUN pip install imageio==2.14.1 "tifffile<2022"
