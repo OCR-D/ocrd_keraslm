@@ -69,7 +69,7 @@ workflows:
       - test-python3
   deploy:
     jobs:
-      - deploy-docker
+      - deploy-docker:
           filters:
             branches:
               only: master
