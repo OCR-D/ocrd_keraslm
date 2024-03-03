@@ -3,6 +3,7 @@ from __future__ import absolute_import
 
 import os
 import sys
+from functools import partial
 import logging
 from math import ceil
 import json
@@ -25,13 +26,14 @@ def cli():
     #pass
 
 @cli.command(short_help='train a language model')
-@click.option('-m', '--model', default="model.h5", help='model file', type=click.Path(dir_okay=False, writable=True))
-@click.option('-w', '--width', default=128, help='number of nodes per hidden layer', type=click.IntRange(min=1, max=9128))
-@click.option('-d', '--depth', default=2, help='number of hidden layers', type=click.IntRange(min=1, max=10))
-@click.option('-l', '--length', default=256, help='number of previous characters seen (window size)', type=click.IntRange(min=1, max=1024))
-@click.option('-v', '--val-data', default=None, help='directory containing validation data files (no split)', type=click.Path(exists=True, dir_okay=True, file_okay=False))
-@click.argument('data', nargs=-1, type=click.File('r'))
-def train(model, width, depth, length, val_data, data):
+@click.option('-m', '--model', default="model.h5", show_default=True, help='model file', type=click.Path(dir_okay=False, writable=True))
+@click.option('-C', '--ckpt', default="ckpt.h5", show_default=True, help='checkpoint file', type=click.Path(dir_okay=False))
+@click.option('-w', '--width', default=128, show_default=True, help='number of nodes per hidden layer', type=click.IntRange(min=1, max=9128))
+@click.option('-d', '--depth', default=2, show_default=True, help='number of hidden layers', type=click.IntRange(min=1, max=10))
+@click.option('-l', '--length', default=256, show_default=True, help='number of previous characters seen (window size)', type=click.IntRange(min=1, max=1024))
+@click.option('-v', '--val-data', default=None, show_default=True, help='directory containing validation data files (instead of automatic split)', type=click.Path(exists=True, dir_okay=True, file_okay=False))
+@click.argument('data', nargs=-1, type=click.Path(exists=True, dir_okay=True, file_okay=True))
+def train(model, ckpt, width, depth, length, val_data, data):
     """Train a language model from DATA files,
        with parameters WIDTH, DEPTH, and LENGTH.
 
@@ -41,21 +43,24 @@ def train(model, width, depth, length, val_data, data):
     
     # train
     rater = lib.Rater()
-    incremental = False
+    continuation = None
     if os.path.isfile(model):
         rater.load_config(model)
         if rater.width == width and rater.depth == depth:
-            incremental = True
-            print('loading weights from existing model for incremental training')
+            continuation = partial(rater.load_weights, model)
+            print('loading weights from existing model for continued training')
         else:
             print('warning: ignoring existing model due to different topology (width=%d, depth=%d)' % (rater.width, rater.depth), file=sys.stderr)
+    elif os.path.isfile(ckpt):
+        continuation = partial(rater.load_weights, ckpt)
+        print('loading weights from checkpoint for continued training')
     rater.width = width
     rater.depth = depth
     rater.length = length
     
     rater.configure()
-    if incremental:
-        rater.load_weights(model)
+    if continuation:
+        continuation()
     if val_data:
         val_files = [os.path.join(val_data, f) for f in os.listdir(val_data)]
         val_data = [open(f, mode='r') for f in val_files if os.path.isfile(f)]

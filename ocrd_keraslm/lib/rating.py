@@ -258,7 +258,7 @@ class Rater(object):
         If `val_data` is given, then do not split, but use those files
         for validation instead (regardless of mode).
         '''
-        from keras.callbacks import EarlyStopping, TerminateOnNaN
+        from keras.callbacks import EarlyStopping, TerminateOnNaN, ModelCheckpoint
         from .callbacks import StopSignalCallback, ResetStatesCallback
         
         # uncomment the following lines to enter tfdbg during training:
@@ -279,12 +279,14 @@ class Rater(object):
         
         # fit model
         earlystopping = EarlyStopping(monitor='val_loss', patience=3, verbose=1, restore_best_weights=True)
-        callbacks = [earlystopping, TerminateOnNaN(),
+        checkpointing = ModelCheckpoint('ckpt.{epoch:02d}-{val_loss:.2f}.h5', monitor='val_loss', verbose=1,
+                                        save_best_only=True, save_weights_only=True)
+        callbacks = [earlystopping, checkpointing, TerminateOnNaN(),
                      StopSignalCallback(logger=self.logger)]
         if self.stateful:
             self.reset_cb = ResetStatesCallback(logger=self.logger)
             callbacks.append(self.reset_cb)
-        
+
         history = self.model.fit_generator(
             self._gen_data_from_files(training_data, steps, split=split, train=True, repeat=True),
             steps_per_epoch=training_epoch_size, epochs=100,
