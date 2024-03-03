@@ -64,7 +64,15 @@ def train(model, ckpt, width, depth, length, val_data, data):
     if val_data:
         val_files = [os.path.join(val_data, f) for f in os.listdir(val_data)]
         val_data = [open(f, mode='r') for f in val_files if os.path.isfile(f)]
-    rater.train(list(data), val_data=val_data)
+    trn_data = []
+    for item in data:
+        if os.path.isdir(item):
+            files = [os.path.join(item, f) for f in os.listdir(item)]
+            items = [open(f, mode='r') for f in files if os.path.isfile(f)]
+            trn_data.extend(items)
+        else:
+            trn_data.append(open(item, mode='r'))
+    rater.train(trn_data, val_data=val_data)
     assert rater.status == 2
     
     # save model and config
