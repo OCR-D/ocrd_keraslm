@@ -58,6 +58,7 @@ class Rater(object):
     
     def configure(self):
         '''Define and compile model for the given parameters.'''
+        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
         from keras.initializers import RandomNormal
         from keras.layers import Dense, TimeDistributed, Input
         from keras.layers import Embedding, Lambda, Concatenate
