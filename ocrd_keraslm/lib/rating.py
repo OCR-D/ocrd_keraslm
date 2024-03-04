@@ -1004,7 +1004,7 @@ class Rater(object):
         sequences = []
         next_chars = []
         i = 0
-        assert size > self.length
+        #assert size > self.length
         for i in range(self.length if self.stateful else 0, size, steps):
             if isinstance(split, np.ndarray):
                 if (split[int(i/steps)] < self.validation_split) == train:
