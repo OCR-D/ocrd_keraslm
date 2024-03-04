@@ -4,9 +4,26 @@ Versioned according to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## [0.4.2] - 2024-03-04
+
+Fixed:
+
+  * adapt to recent numpy/h5py/protobuf and OCR-D changes
+  * prolong Tensorflow 1 life on Py38 via nvidia-tensorflow image
+  * suppress TF verbose messages
+
 Changed:
 
-  * update tests and assets to recent OCR-D changes
+  * lib: improve augmentation and stateless modes
+  * tests: use OCR-D resmgr for Tesseract models
+  * CI: update tests, adapt to ocrd/tesserocr changes
+
+Added:
+
+  * add continuous deployment via Docker
+  * train: allow passing directory for training data, too
+  * lib: add checkpointing
+  * train: allow continuing from checkpoint
 
 ## [0.4.1] - 2020-09-24
 
@@ -41,6 +58,7 @@ Fixed:
 
 
 <!-- link-labels -->
+[0.4.2]: ../../compare/v0.4.1...v0.4.2
 [0.4.1]: ../../compare/v0.4.0...v0.4.1
 [0.4.0]: ../../compare/0.3.2...v0.4.0
 [0.3.2]: ../../compare/0.3.1...0.3.2
