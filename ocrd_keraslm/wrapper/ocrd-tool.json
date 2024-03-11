@@ -55,7 +55,15 @@
           "description": "share of the LM scores over the input confidences",
           "default": 0.5
         }
-      }
+      },
+      "resources": [
+        {
+          "url": "https://github.com/OCR-D/ocrd_keraslm/releases/download/v0.4.3/model_dta_full.h5",
+          "name": "model_dta_full.h5",
+          "description": "character-level LM as stateful contiguous LSTM model (2 layers, 128 hidden nodes each, window length 256) trained on complete Deutsches Textarchiv",
+          "size": 1769684
+        }
+      ]
     }
   }
 }
