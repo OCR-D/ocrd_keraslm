@@ -4,6 +4,8 @@ Versioned according to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## [0.4.3] - 2024-03-11
+
 Changed:
 
   * `plot_context_embeddings_projection`: add year labels
@@ -67,6 +69,7 @@ Fixed:
 
 
 <!-- link-labels -->
+[0.4.3]: ../../compare/v0.4.2...v0.4.3
 [0.4.2]: ../../compare/v0.4.1...v0.4.2
 [0.4.1]: ../../compare/v0.4.0...v0.4.1
 [0.4.0]: ../../compare/0.3.2...v0.4.0
