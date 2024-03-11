@@ -2,6 +2,19 @@
     character-level language modelling using Keras
 
 [![CircleCI](https://circleci.com/gh/OCR-D/ocrd_keraslm.svg?style=svg)](https://circleci.com/gh/OCR-D/ocrd_keraslm)
+[![Docker Automated build](https://img.shields.io/docker/automated/ocrd/keraslm.svg)](https://hub.docker.com/r/ocrd/keraslm/tags/)
+
+ * [Introduction](#introduction)
+    * [Architecture](#architecture)
+    * [Modes of operation](#modes-of-operation)
+    * [Context conditioning](#context-conditioning)
+    * [Underspecification](#underspecification)
+ * [Installation](#installation)
+ * [Usage](#usage)
+    * [Command line interface `keraslm-rate`](#command-line-interface-keraslm-rate)
+    * [OCR-D processor interface `ocrd-keraslm-rate`](#ocr-d-processor-interface-ocrd-keraslm-rate)
+    * [Models](#models)
+ * [Testing](#testing)
 
 ## Introduction
 
@@ -113,57 +126,74 @@ keraslm-rate test -m model_dta_64_4_256.h5 dta_komplett_2017-09-01/txt/grimm_*.t
 To be used with [PageXML](https://www.primaresearch.org/tools/PAGELibraries) documents in an [OCR-D](https://github.com/OCR-D/spec/) annotation workflow. Input could be anything with a textual annotation (`TextEquiv` on the given `textequiv_level`). The LM rater could be used for both quality control (without alternative decoding, using only each first index `TextEquiv`) and part of post-correction (with `alternative_decoding=True`, finding the best path among `TextEquiv` indexes).
 
 ```json
-  "tools": {
-    "ocrd-keraslm-rate": {
-      "executable": "ocrd-keraslm-rate",
-      "categories": [
-        "Text recognition and optimization"
-      ],
-      "steps": [
-        "recognition/text-recognition"
-      ],
-      "description": "Rate elements of the text with a character-level LSTM language model in Keras",
-      "input_file_grp": [
-        "OCR-D-OCR-TESS",
-        "OCR-D-OCR-KRAK",
-        "OCR-D-OCR-OCRO",
-        "OCR-D-OCR-CALA",
-        "OCR-D-OCR-ANY",
-        "OCR-D-COR-CIS",
-        "OCR-D-COR-ASV"
-      ],
-      "output_file_grp": [
-        "OCR-D-COR-LM"
-      ],
-      "parameters": {
-        "model_file": {
-          "type": "string",
-          "format": "uri",
-          "content-type": "application/x-hdf;subtype=bag",
-          "description": "path of h5py weight/config file for model trained with keraslm",
-          "required": true,
-          "cacheable": true
-        },
-        "textequiv_level": {
-          "type": "string",
-          "enum": ["region", "line", "word", "glyph"],
-          "default": "glyph",
-          "description": "PAGE XML hierarchy level to evaluate TextEquiv sequences on"
-        },
-        "alternative_decoding": {
-          "type": "boolean",
-          "description": "whether to process all TextEquiv alternatives, finding the best path via beam search, and delete each non-best alternative",
-          "default": true
-        },
-        "beam_width": {
-          "type": "number",
-          "format": "integer",
-          "description": "maximum number of best partial paths to consider during search with alternative_decoding",
-          "default": 100
-        }
-      }
-    }
+{
+ "executable": "ocrd-keraslm-rate",
+ "categories": [
+  "Text recognition and optimization"
+ ],
+ "steps": [
+  "recognition/text-recognition"
+ ],
+ "description": "Rate elements of the text with a character-level LSTM language model in Keras",
+ "input_file_grp": [
+  "OCR-D-OCR-TESS",
+  "OCR-D-OCR-KRAK",
+  "OCR-D-OCR-OCRO",
+  "OCR-D-OCR-CALA",
+  "OCR-D-OCR-ANY",
+  "OCR-D-COR-CIS",
+  "OCR-D-COR-ASV"
+ ],
+ "output_file_grp": [
+  "OCR-D-COR-LM"
+ ],
+ "parameters": {
+  "model_file": {
+   "type": "string",
+   "format": "uri",
+   "content-type": "application/x-hdf;subtype=bag",
+   "description": "path of h5py weight/config file for model trained with keraslm",
+   "required": true,
+   "cacheable": true
+  },
+  "textequiv_level": {
+   "type": "string",
+   "enum": [
+    "region",
+    "line",
+    "word",
+    "glyph"
+   ],
+   "default": "glyph",
+   "description": "PAGE XML hierarchy level to evaluate TextEquiv sequences on"
+  },
+  "alternative_decoding": {
+   "type": "boolean",
+   "description": "whether to process all TextEquiv alternatives, finding the best path via beam search, and delete each non-best alternative",
+   "default": true
+  },
+  "beam_width": {
+   "type": "number",
+   "format": "integer",
+   "description": "maximum number of best partial paths to consider during search with alternative_decoding",
+   "default": 10
+  },
+  "lm_weight": {
+   "type": "number",
+   "format": "float",
+   "description": "share of the LM scores over the input confidences",
+   "default": 0.5
   }
+ },
+ "resources": [
+  {
+   "url": "https://github.com/OCR-D/ocrd_keraslm/releases/download/v0.4.3/model_dta_full.h5",
+   "name": "model_dta_full.h5",
+   "description": "character-level LM as stateful contiguous LSTM model (2 layers, 128 hidden nodes each, window length 256) trained on complete Deutsches Textarchiv",
+   "size": 1769684
+  }
+ ]
+}
 ```
 
 Examples:
@@ -174,13 +204,27 @@ ocrd workspace -d ws1 clone -a test/assets/kant_aufklaerung_1784/mets.xml
 cd ws1
 ocrd-tesserocr-segment-region -I OCR-D-IMG -O OCR-D-SEG-BLOCK
 ocrd-tesserocr-segment-line -I OCR-D-SEG-BLOCK -O OCR-D-SEG-LINE
-ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-WORD -p '{ "textequiv_level" : "word", "model" : "Fraktur" }'
-ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-GLYPH -p '{ "textequiv_level" : "glyph", "model" : "deu-frak" }'
+ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-WORD -P textequiv_level word -P model Fraktur
+ocrd-tesserocr-recognize -I OCR-D-SEG-LINE -O OCR-D-OCR-TESS-GLYPH -P textequiv_level glyph -P model deu-frak
+# download Deutsches Textarchiv language model
+ocrd resmgr download ocrd-keraslm-rate model_dta_full.h5
 # get confidences and perplexity:
-ocrd-keraslm-rate -I OCR-D-OCR-TESS-WORD -O OCR-D-OCR-LM-WORD -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "word", "alternative_decoding": false }'
+ocrd-keraslm-rate -I OCR-D-OCR-TESS-WORD -O OCR-D-OCR-LM-WORD -P model_file model_dta_full.h5 -P textequiv_level word -P alternative_decoding false
 # also get best path:
-ocrd-keraslm-rate -I OCR-D-OCR-TESS-GLYPH -O OCR-D-OCR-LM-GLYPH -p '{ "model_file": "model_dta_64_4_256.h5", "textequiv_level": "glyph", "alternative_decoding": true, "beam_width": 10 }'
+ocrd-keraslm-rate -I OCR-D-OCR-TESS-GLYPH -O OCR-D-OCR-LM-GLYPH -P model_file model_dta_full.h5 -P textequiv_level glyph -P alternative_decoding true -P beam_width 10
 ```
+
+### Models
+
+Pretrained models will be published under [Github release assets](https://github.com/OCR-D/ocrd_keraslm/releases)
+and made visible via [OCR-D Resource Manager](https://ocr-d.de/en/models).
+
+So far, the only published models are:
+
+- [model_dta_full.h5](https://github.com/OCR-D/ocrd_keraslm/releases/download/v0.4.3/model_dta_full.h5)  
+  This LM was configured as stateful contiguous LSTM model (2 layers, 128 hidden nodes each, window length 256),
+  and trained on the complete [Deutsches Textarchiv](https://deutsches-textarchiv.de/) fulltext (80%/20% split).  
+  It achieves a perplexity of 2.51 on the validation subset after 4 epochs.
 
 ## Testing
 
