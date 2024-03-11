@@ -4,6 +4,15 @@ Versioned according to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+Changed:
+
+  * `plot_context_embeddings_projection`: add year labels
+
+Added:
+
+  * test: allow passing directory for test data, too
+  * generate: option `--variants` for nr of alternative sequences
+
 ## [0.4.2] - 2024-03-04
 
 Fixed:
