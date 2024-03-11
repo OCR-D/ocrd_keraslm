@@ -22,8 +22,8 @@ class SortedGroup(click.Group):
 
 @click.group(cls=SortedGroup)
 def cli():
-    logging.basicConfig(level=logging.DEBUG)
-    #pass
+    #logging.basicConfig(level=logging.DEBUG)
+    pass
 
 @cli.command(short_help='train a language model')
 @click.option('-m', '--model', default="model.h5", show_default=True, help='model file', type=click.Path(dir_okay=False, writable=True))
@@ -108,7 +108,7 @@ def apply(model, text, context):
 
 @cli.command(short_help='get overall perplexity from language model')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
-@click.argument('data', nargs=-1, type=click.File('r'))
+@click.argument('data', nargs=-1, type=click.Path(exists=True, dir_okay=True, file_okay=True))
 def test(model, data):
     """Apply a language model to DATA files and compute its overall perplexity."""
     
@@ -117,9 +117,17 @@ def test(model, data):
     rater.load_config(model)
     rater.configure()
     rater.load_weights(model)
-    
+
+    test_data = []
+    for item in data:
+        if os.path.isdir(item):
+            files = [os.path.join(item, f) for f in os.listdir(item)]
+            items = [open(f, mode='r') for f in files if os.path.isfile(f)]
+            test_data.extend(items)
+        else:
+            test_data.append(open(item, mode='r'))
     # evaluate on files
-    perplexity = rater.test(data)
+    perplexity = rater.test(test_data)
     click.echo(perplexity)
 
 @cli.command(short_help='sample characters from language model')
