@@ -629,7 +629,7 @@ class Rater(object):
         return preds, final_states
 
     # todo: also allow specifying suffix
-    def generate(self, prefix, number, context=None):
+    def generate(self, prefix, length, context=None, variants=1):
         '''Generate a number of characters after a prefix.
         
         Calculate the hidden layer state after reading the string `prefix`
@@ -674,7 +674,7 @@ class Rater(object):
                             cost=0.0)]
         
         # beam search
-        for _ in range(number): # iterate over number of characters to be generated
+        for _ in range(length): # iterate over number of characters to be generated
             fringe = next_fringe
             preds, states = self.predict([n.value for n in fringe],
                                          [n.state for n in fringe],
@@ -692,8 +692,9 @@ class Rater(object):
                     n_new = Node(parent=n, state=state, value=self.mapping[1][best], cost=cost)
                     insort_left(next_fringe, n_new) # add alternative to tree
             next_fringe = next_fringe[:256] # keep 256-best paths (equals batch size)
-        best = next_fringe[0] # best-scoring
-        result = ''.join([n.value for n in best.to_sequence()])
+        best = next_fringe[0:variants] # best-scoring
+        result = [''.join([n.value for n in res.to_sequence()])
+                  for res in best]
         
         return result # without prefix
 

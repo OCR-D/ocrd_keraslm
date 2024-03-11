@@ -133,10 +133,11 @@ def test(model, data):
 @cli.command(short_help='sample characters from language model')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
 @click.option('-n', '--number', default=1, help='number of characters to sample', type=click.IntRange(min=1, max=10000))
+@click.option('-v', '--variants', default=1, help='number of character sequences to sample', type=click.IntRange(min=1, max=10000))
 @click.option('-c', '--context', default=None, help='constant meta-data input')
 @click.argument('prefix', type=click.STRING)
 # todo: also allow specifying suffix
-def generate(model, number, prefix, context):
+def generate(model, number, variants, context, prefix):
     """Apply a language model, generating the most probable characters (starting with PREFIX string)."""
 
     # load model
@@ -148,12 +149,13 @@ def generate(model, number, prefix, context):
     rater.load_weights(model)
     
     if context:
-        context = list(map(lambda x: ceil(int(x)/10), context.split(' ')))
+        context = [ceil(int(x)/10) for x in context.split(' ')]
     else:
         context = rater.underspecify_contexts()
     
-    result = rater.generate(prefix, number, context)
-    click.echo(prefix[:-1] + result)
+    result = rater.generate(prefix, number, context, variants)
+    for res in result:
+        click.echo(prefix[:-1] + res)
 
 @cli.command(short_help='Print the mapped characters')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
