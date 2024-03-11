@@ -30,6 +30,7 @@ setup(
         'plotting': [
             'sklearn',
             'matplotlib',
+            'adjusttext',
             ]
     },
     package_data={

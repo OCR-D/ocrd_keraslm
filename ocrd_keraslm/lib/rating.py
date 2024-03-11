@@ -1197,14 +1197,22 @@ class Rater(object):
         '''
         logging.getLogger('matplotlib').setLevel(logging.WARNING) # workaround
         from matplotlib import pyplot as plt
+        from adjustText import adjust_text
         from sklearn.decomposition import PCA
         
         assert self.status == 2
         ctxtlay = self.model.get_layer(name='context%d_embedding' % n)
         ctxtwgt = ctxtlay.get_weights()[0]
         ctxtprj = PCA(n_components=2).fit_transform(ctxtwgt) # get a 2-d view
-        plt.plot(ctxtprj[:, 0], ctxtprj[:, 1], 'bx') # blue crosses (all)
-        plt.plot(ctxtprj[0, 0], ctxtprj[0, 1], 'ro') # red circle (zero)
+        plt.figure(figsize=(11.7,8.3)) # inch
+        plt.plot(ctxtprj[:, 0], ctxtprj[:, 1], 'bo', markersize=2) # blue circle (all)
+        #plt.plot(ctxtprj[0, 0], ctxtprj[0, 1], 'rx') # red cross (zero)
+        texts = [plt.text(xy[0], xy[1], str(year) + 'x', c='b', size='xx-small') # str(year) + 'x'
+                 for year, xy in enumerate(ctxtprj)]
+        adjust_text(texts, time_lim=20, iter_lim=20, expand_axes=True,
+                    arrowprops=dict(arrowstyle="-", color='b', lw=0.5))
+        plt.tick_params(left=False, right=False, bottom=False,
+                        labelleft=False, labelbottom=False)
         plt.savefig(filename)
 
 class Node(object):
