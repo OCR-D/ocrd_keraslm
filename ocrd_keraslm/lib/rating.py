@@ -266,7 +266,7 @@ class Rater(object):
         #from tensorflow.python import debug as tf_debug
         #K.set_session(tf_debug.LocalCLIDebugWrapperSession(K.get_session()))
 
-        assert self.status > 0 # must be configured already, but incremental training is allowed
+        assert self.status > 0 # must be configured already, but continued training is allowed
         assert self.incremental is False # no explicit state transfer
         
         # extract character mapping and calculate epoch size:
@@ -381,8 +381,10 @@ class Rater(object):
         
         assert self.status >= 1
         embedding = self.model.get_layer(name='char_embedding')
-        if embedding.input_dim < self.voc_size: # more chars than during last training?
-            if self.status >= 2: # weights exist already (i.e. incremental training)?
+        if embedding.input_dim < self.voc_size:
+            # more chars than during last training
+            if self.status >= 2 and self.voc_size > 0:
+                # weights and mapping exist already (i.e. continued training)
                 self.logger.warning('transferring weights from previous model with only %d character types', embedding.input_dim)
                 # get old weights:
                 layer_weights = [layer.get_weights() for layer in self.model.layers]
