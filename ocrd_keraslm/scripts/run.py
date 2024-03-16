@@ -12,10 +12,13 @@ import click
 from .. import lib
 
 class SortedGroup(click.Group):
+    # customise command order in a logical way
     def list_commands(self, ctx):
         commands = set(super(SortedGroup, self).list_commands(ctx))
-        commands0 = ['train', 'test', 'apply', 'generate', 'print-charset', 'prune-charset',
-                     'plot-char-embeddings-similarity', 'plot-context-embeddings-similarity',
+        commands0 = ['train', 'test', 'apply', 'generate',
+                     'print-history', 'print-charset', 'prune-charset',
+                     'plot-char-embeddings-similarity',
+                     'plot-context-embeddings-similarity',
                      'plot-context-embeddings-projection']
         commands0.extend(list(commands.difference(set(commands0))))
         return commands0
@@ -159,6 +162,13 @@ def generate(model, number, variants, context, prefix):
     result = rater.generate(prefix, number, context, variants)
     for res in result:
         click.echo(prefix[:-1] + res)
+
+@cli.command(short_help='Print the training history')
+@click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))
+def print_history(model):
+    rater = lib.Rater()
+    rater.load_config(model)
+    rater.print_history()
 
 @cli.command(short_help='Print the mapped characters')
 @click.option('-m', '--model', required=True, help='model file', type=click.Path(dir_okay=False, exists=True))

@@ -1,5 +1,6 @@
 import os
 import unicodedata
+import json
 from random import shuffle
 from math import log, exp, ceil
 from bisect import insort_left
@@ -53,6 +54,7 @@ class Rater(object):
         self.reset_cb = None # ResetStatesCallback instance in stateful training
         self.incremental = False # whether compiled with additional (initial) input state and (final) output state (explicit state transfer)
         self.model = None # (assigned by configure)
+        self.history = {} # (assigned by train)
         self.status = 0 # empty / configured / trained?
         self.voc_size = 0 # (derived from mapping after loading or preparing training)
     
@@ -294,10 +296,11 @@ class Rater(object):
             validation_data=self._gen_data_from_files(validation_data, steps, split=split, train=False, repeat=True),
             validation_steps=validation_epoch_size,
             verbose=1, callbacks=callbacks)
+        self.history = history.history
         # set state
-        if 'val_loss' in history.history:
-            self.logger.info('training finished with val_loss %f', min(history.history['val_loss']))
-            if (np.isnan(history.history['val_loss'][-1]) or
+        if 'val_loss' in self.history:
+            self.logger.info('training finished with val_loss %f', min(self.history['val_loss']))
+            if (np.isnan(self.history['val_loss'][-1]) or
                 earlystopping.stopped_epoch == 0):
                 # recover weights (which TerminateOnNaN prevented EarlyStopping from doing)
                 self.model.set_weights(earlystopping.best_weights)
@@ -305,6 +308,11 @@ class Rater(object):
         else:
             self.logger.critical('training failed')
             self.status = 1
+
+    def print_history(self):
+        '''Print the training history metadata'''
+        for k, v in self.history.items():
+            print(f"{k}: {v}")
     
     def _split_data(self, data, val_data):
         '''Read text files and split into training vs validation, count batches and update char mapping.'''
@@ -918,6 +926,16 @@ class Rater(object):
         self.model.save_weights(filename)
         with h5py.File(filename, 'a') as file:
             group = file.create_group('config')
+            class NumpyEncoder(json.JSONEncoder):
+                def default(self, obj):
+                    if isinstance(obj, np.integer):
+                        return int(obj)
+                    elif isinstance(obj, np.floating):
+                        return float(obj)
+                    elif isinstance(obj, np.ndarray):
+                        return obj.tolist()
+                    return json.JSONEncoder.default(self, obj)
+            group.create_dataset('history', data=json.dumps(self.history, cls=NumpyEncoder))
             group.create_dataset('width', data=np.array(self.width))
             group.create_dataset('depth', data=np.array(self.depth))
             group.create_dataset('length', data=np.array(self.length))
@@ -934,6 +952,7 @@ class Rater(object):
         assert self.status == 0
         with h5py.File(filename, 'r') as file:
             group = file['config']
+            self.history = json.loads(group['history'][()]) if 'history' in group else {}
             self.width = group['width'][()]
             self.depth = group['depth'][()]
             self.length = group['length'][()]
