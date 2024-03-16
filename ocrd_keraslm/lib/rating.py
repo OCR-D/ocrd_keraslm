@@ -383,7 +383,7 @@ class Rater(object):
         embedding = self.model.get_layer(name='char_embedding')
         if embedding.input_dim < self.voc_size:
             # more chars than during last training
-            if self.status >= 2 and self.voc_size > 0:
+            if self.status >= 2:
                 # weights and mapping exist already (i.e. continued training)
                 self.logger.warning('transferring weights from previous model with only %d character types', embedding.input_dim)
                 # get old weights:
@@ -393,7 +393,7 @@ class Rater(object):
                 # set old weights:
                 for layer, weights in zip(self.model.layers, layer_weights):
                     self.logger.debug('transferring weights for layer %s %s', layer.name, str([w.shape for w in weights]))
-                    if layer.name == 'char_embedding':
+                    if layer.name == 'char_embedding' and embedding.input_dim > 0:
                         # transfer weights from previous Embedding layer to new one:
                         new_weights = layer.get_weights() # freshly initialised
                         #new_weights[0][embedding.input_dim:, 0:embedding.output_dim] = weights[0][0,:] # repeat zero vector instead
