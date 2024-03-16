@@ -31,7 +31,7 @@ def cli():
 @click.option('-w', '--width', default=128, show_default=True, help='number of nodes per hidden layer', type=click.IntRange(min=1, max=9128))
 @click.option('-d', '--depth', default=2, show_default=True, help='number of hidden layers', type=click.IntRange(min=1, max=10))
 @click.option('-l', '--length', default=256, show_default=True, help='number of previous characters seen (window size)', type=click.IntRange(min=1, max=1024))
-@click.option('-v', '--val-data', default=None, show_default=True, help='directory containing validation data files (instead of automatic split)', type=click.Path(exists=True, dir_okay=True, file_okay=False))
+@click.option('-v', '--val-data', default=None, show_default=True, help='validation data file or directory (instead of automatic split)', type=click.Path(exists=True, dir_okay=True, file_okay=True))
 @click.argument('data', nargs=-1, type=click.Path(exists=True, dir_okay=True, file_okay=True))
 def train(model, ckpt, width, depth, length, val_data, data):
     """Train a language model from DATA files,
@@ -62,12 +62,15 @@ def train(model, ckpt, width, depth, length, val_data, data):
     if continuation:
         continuation()
     if val_data:
-        val_files = [os.path.join(val_data, f) for f in os.listdir(val_data)]
+        if os.path.isdir(val_data):
+            val_files = [f.path for f in os.scandir(val_data)]
+        else:
+            val_files = [val_data]
         val_data = [open(f, mode='r') for f in val_files if os.path.isfile(f)]
     trn_data = []
     for item in data:
         if os.path.isdir(item):
-            files = [os.path.join(item, f) for f in os.listdir(item)]
+            files = [f.path for f in os.scandir(item)]
             items = [open(f, mode='r') for f in files if os.path.isfile(f)]
             trn_data.extend(items)
         else:
