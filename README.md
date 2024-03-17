@@ -125,75 +125,102 @@ keraslm-rate test -m model_dta_64_4_256.h5 dta_komplett_2017-09-01/txt/grimm_*.t
 
 To be used with [PageXML](https://www.primaresearch.org/tools/PAGELibraries) documents in an [OCR-D](https://github.com/OCR-D/spec/) annotation workflow. Input could be anything with a textual annotation (`TextEquiv` on the given `textequiv_level`). The LM rater could be used for both quality control (without alternative decoding, using only each first index `TextEquiv`) and part of post-correction (with `alternative_decoding=True`, finding the best path among `TextEquiv` indexes).
 
-```json
-{
- "executable": "ocrd-keraslm-rate",
- "categories": [
-  "Text recognition and optimization"
- ],
- "steps": [
-  "recognition/text-recognition"
- ],
- "description": "Rate elements of the text with a character-level LSTM language model in Keras",
- "input_file_grp": [
-  "OCR-D-OCR-TESS",
-  "OCR-D-OCR-KRAK",
-  "OCR-D-OCR-OCRO",
-  "OCR-D-OCR-CALA",
-  "OCR-D-OCR-ANY",
-  "OCR-D-COR-CIS",
-  "OCR-D-COR-ASV"
- ],
- "output_file_grp": [
-  "OCR-D-COR-LM"
- ],
- "parameters": {
-  "model_file": {
-   "type": "string",
-   "format": "uri",
-   "content-type": "application/x-hdf;subtype=bag",
-   "description": "path of h5py weight/config file for model trained with keraslm",
-   "required": true,
-   "cacheable": true
-  },
-  "textequiv_level": {
-   "type": "string",
-   "enum": [
-    "region",
-    "line",
-    "word",
-    "glyph"
-   ],
-   "default": "glyph",
-   "description": "PAGE XML hierarchy level to evaluate TextEquiv sequences on"
-  },
-  "alternative_decoding": {
-   "type": "boolean",
-   "description": "whether to process all TextEquiv alternatives, finding the best path via beam search, and delete each non-best alternative",
-   "default": true
-  },
-  "beam_width": {
-   "type": "number",
-   "format": "integer",
-   "description": "maximum number of best partial paths to consider during search with alternative_decoding",
-   "default": 10
-  },
-  "lm_weight": {
-   "type": "number",
-   "format": "float",
-   "description": "share of the LM scores over the input confidences",
-   "default": 0.5
-  }
- },
- "resources": [
-  {
-   "url": "https://github.com/OCR-D/ocrd_keraslm/releases/download/v0.4.3/model_dta_full.h5",
-   "name": "model_dta_full.h5",
-   "description": "character-level LM as stateful contiguous LSTM model (2 layers, 128 hidden nodes each, window length 256) trained on complete Deutsches Textarchiv",
-   "size": 1769684
-  }
- ]
-}
+```shell
+Usage: ocrd-keraslm-rate [worker|server] [OPTIONS]
+
+  Rate elements of the text with a character-level LSTM language model in Keras
+
+  > Rate text with the language model, either for scoring or finding the
+  > best path across alternatives.
+
+  > Open and deserialise PAGE input files, then iterate over the segment
+  > hierarchy down to the requested `textequiv_level`, making sequences
+  > of first TextEquiv objects (if `alternative_decoding` is false), or
+  > of lists of all TextEquiv objects (otherwise) as a linear graph for
+  > input to the LM. If the level is above glyph, then insert artificial
+  > whitespace TextEquiv where implicit tokenisation rules require it.
+
+  > Next, if `alternative_decoding` is false, then pass the concatenated
+  > string of the page text to the LM and map the returned sequence of
+  > probabilities to the substrings in the input TextEquiv. For each
+  > TextEquiv, calculate the average character probability (LM score)
+  > and combine that with the input confidence (OCR score) by applying
+  > `lm_weight`. Assign the resulting probability as new confidence to
+  > the TextEquiv, and ensure no other TextEquiv remain on the segment.
+  > Finally, calculate the overall average LM probability,  and the
+  > character and segment-level perplexity, and print it on the logger.
+
+  > Otherwise (i.e with `alternative_decoding=true`), search for the
+  > best paths through the input graph of the page (with TextEquiv
+  > string alternatives as edges) by applying the LM successively via
+  > beam search using `beam_width` (keeping a traceback of LM state
+  > history at each node, passing and updating LM state explicitly). As
+  > in the above trivial case without `alternative_decoding`, then
+  > combine LM scores weighted by `lm_weight` with input confidence on
+  > the graph's edges. Also, prune worst paths and apply LM state
+  > history clustering to avoid expanding all possible combinations.
+  > Finally, look into the current best overall path, traversing back to
+  > the last node of the previous page's graph. Lock into that node by
+  > removing all current paths that do not derive from it, and making
+  > its history path the final decision for the previous page: Apply
+  > that path by removing all but the chosen TextEquiv alternatives,
+  > assigning the resulting confidences, and making the levels above
+  > `textequiv_level` consistent with that textual result (via
+  > concatenation joined by whitespace). Also, calculate the overall
+  > average LM probability, and the character and segment-level
+  > perplexity, and print it on the logger. Moreover, at the last page
+  > at the end of the document, lock into the current best path
+  > analogously.
+
+  > Produce new output files by serialising the resulting hierarchy for
+  > each page.
+
+Subcommands:
+    worker      Start a processing worker rather than do local processing
+    server      Start a processor server rather than do local processing
+
+Options for processing:
+  -m, --mets URL-PATH             URL or file path of METS to process [./mets.xml]
+  -w, --working-dir PATH          Working directory of local workspace [dirname(URL-PATH)]
+  -I, --input-file-grp USE        File group(s) used as input
+  -O, --output-file-grp USE       File group(s) used as output
+  -g, --page-id ID                Physical page ID(s) to process instead of full document []
+  --overwrite                     Remove existing output pages/images
+                                  (with "--page-id", remove only those)
+  --profile                       Enable profiling
+  --profile-file PROF-PATH        Write cProfile stats to PROF-PATH. Implies "--profile"
+  -p, --parameter JSON-PATH       Parameters, either verbatim JSON string
+                                  or JSON file path
+  -P, --param-override KEY VAL    Override a single JSON object key-value pair,
+                                  taking precedence over --parameter
+  -U, --mets-server-url URL       URL of a METS Server for parallel incremental access to METS
+                                  If URL starts with http:// start an HTTP server there,
+                                  otherwise URL is a path to an on-demand-created unix socket
+  -l, --log-level [OFF|ERROR|WARN|INFO|DEBUG|TRACE]
+                                  Override log level globally [INFO]
+
+Options for information:
+  -C, --show-resource RESNAME     Dump the content of processor resource RESNAME
+  -L, --list-resources            List names of processor resources
+  -J, --dump-json                 Dump tool description as JSON
+  -D, --dump-module-dir           Show the 'module' resource location path for this processor
+  -h, --help                      Show this message
+  -V, --version                   Show version
+
+Parameters:
+   "model_file" [string - REQUIRED]
+    path of h5py weight/config file for model trained with keraslm
+   "textequiv_level" [string - "glyph"]
+    PAGE XML hierarchy level to evaluate TextEquiv sequences on
+    Possible values: ["region", "line", "word", "glyph"]
+   "alternative_decoding" [boolean - true]
+    whether to process all TextEquiv alternatives, finding the best path
+    via beam search, and delete each non-best alternative
+   "beam_width" [number - 10]
+    maximum number of best partial paths to consider during search with
+    alternative_decoding
+   "lm_weight" [number - 0.5]
+    share of the LM scores over the input confidences
 ```
 
 Examples:
