@@ -37,12 +37,17 @@ class KerasRate(Processor):
         kwargs['ocrd_tool'] = OCRD_TOOL['tools']['ocrd-keraslm-rate']
         kwargs['version'] = OCRD_TOOL['version']
         super(KerasRate, self).__init__(*args, **kwargs)
-        if not hasattr(self, 'workspace') or not self.workspace: # no parameter/workspace for --dump-json or --version (no processing)
-            return
-        
-        LOG = getLogger('processor.KerasRate')
-        self.rater = lib.Rater(logger=LOG)
-        self.rater.load_config(self.parameter['model_file'])
+        if hasattr(self, 'output_file_grp'):
+            # processing context
+            self.setup()
+
+    def setup(self):
+        if not 'TF_CPP_MIN_LOG_LEVEL' in os.environ:
+            os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # error
+        model = self.parameter['model_file']
+        model = self.resolve_resource(model)
+        self.rater = lib.Rater(logger=getLogger('processor.KerasRate'))
+        self.rater.load_config(model)
         # overrides necessary before compilation:
         if self.parameter['alternative_decoding']:
             self.rater.stateful = False # no implicit state transfer
@@ -50,14 +55,14 @@ class KerasRate(Processor):
         elif self.rater.stateful:
             self.rater.batch_size = 1 # make sure states are consistent with windows after 1 batch
         self.rater.configure()
-        self.rater.load_weights(self.parameter['model_file'])
+        self.rater.load_weights(model)
+        self.rater.logger.debug("Loaded model_file '%s'", model)
     
     def process(self):
         """Rates textual annotation of PAGE input files, producing output files with LM scores (and choices).
         
         ... explain incremental page-wise processing here ...
         """
-        LOG = getLogger('processor.KerasRate')
         assert_file_grp_cardinality(self.input_file_grp, 1)
         assert_file_grp_cardinality(self.output_file_grp, 1)
 
@@ -70,20 +75,10 @@ class KerasRate(Processor):
         prev_file = None
         for (n, input_file) in enumerate(self.input_files):
             page_id = input_file.pageId or input_file.ID
-            LOG.info("INPUT FILE %i / %s", n, page_id)
+            self.rater.logger.info("INPUT FILE %i / %s", n, page_id)
             pcgts = page_from_file(self.workspace.download_file(input_file))
-            LOG.info("Scoring text in page '%s' at the %s level", pcgts.get_pcGtsId(), level)
-            
-            # annotate processing metadata:
-            metadata = pcgts.get_Metadata() # ensured by page_from_file()
-            metadata.add_MetadataItem(
-                MetadataItemType(type_="processingStep",
-                                 name=OCRD_TOOL['tools']['ocrd-keraslm-rate']['steps'][0],
-                                 value='ocrd-keraslm-rate',
-                                 Labels=[LabelsType(externalRef="parameters",
-                                                    Label=[LabelType(type_=name,
-                                                                     value=self.parameter[name])
-                                                           for name in self.parameter.keys()])]))
+            self.add_metadata(pcgts)
+            self.rater.logger.info("Scoring text in page '%s' at the %s level", pcgts.get_pcGtsId(), level)
             
             # context preprocessing:
             # todo: as soon as we have true MODS meta-data in METS (dmdSec/mdWrap/xmlData/mods),
@@ -105,8 +100,8 @@ class KerasRate(Processor):
             # remove non-path TextEquivs, modify confidences:
             if not self.parameter['alternative_decoding']:
                 text = [(edge['element'], edge['alternatives']) for edge in _get_edges(graph, 0)] # graph's path
-                textstring = u''.join(textequivs[0].Unicode for element, textequivs in text) # same length as text
-                LOG.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
+                textstring = ''.join(textequivs[0].Unicode for element, textequivs in text) # same length as text
+                self.rater.logger.info("Rating %d elements with a total of %d characters", len(text), len(textstring))
                 confidences = self.rater.rate(textstring, context) # much faster
                 i = 0
                 for element, textequivs in text:
@@ -119,12 +114,12 @@ class KerasRate(Processor):
                     textequiv.set_conf(conf * lm_weight + conf2 * (1. - lm_weight))
                     i += textequiv_len
                 if i != len(confidences):
-                    LOG.critical("Input text length and output scores length are off by %d characters", i-len(confidences))
+                    self.rater.logger.critical("Input text length and output scores length are off by %d characters", i-len(confidences))
                 avg = sum(confidences)/len(confidences)
                 ent = sum([-log(max(p, 1e-99), 2) for p in confidences])/len(confidences)
                 ppl = pow(2.0, ent) # character level
                 ppll = pow(2.0, ent * len(confidences)/len(text)) # textequiv level (including spaces/newlines)
-                LOG.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
+                self.rater.logger.info("avg: %.3f, char ppl: %.3f, %s ppl: %.3f", avg, ppl, level, ppll) # character need not always equal glyph!
                 
                 # ensure parent textequivs are up to date:
                 page_update_higher_textequiv_levels(level, pcgts)
@@ -141,7 +136,7 @@ class KerasRate(Processor):
                     content=to_xml(pcgts),
                 )
             else:
-                LOG.info("Rating %d elements including its alternatives", end_node - start_node)
+                self.rater.logger.info("Rating %d elements including its alternatives", end_node - start_node)
                 path, entropy, traceback = self.rater.rate_best(
                     graph, start_node, end_node,
                     start_traceback=prev_traceback,
@@ -304,11 +299,11 @@ def page_update_higher_textequiv_levels(level, pcgts):
                     if level != 'word':
                         for word in words:
                             glyphs = word.get_Glyph()
-                            word_unicode = u''.join(glyph.get_TextEquiv()[0].Unicode if glyph.get_TextEquiv() else u'' for glyph in glyphs)
+                            word_unicode = ''.join(glyph.get_TextEquiv()[0].Unicode if glyph.get_TextEquiv() else '' for glyph in glyphs)
                             word.set_TextEquiv([TextEquivType(Unicode=word_unicode)]) # remove old
-                    line_unicode = u' '.join(word.get_TextEquiv()[0].Unicode if word.get_TextEquiv() else u'' for word in words)
+                    line_unicode = u' '.join(word.get_TextEquiv()[0].Unicode if word.get_TextEquiv() else '' for word in words)
                     line.set_TextEquiv([TextEquivType(Unicode=line_unicode)]) # remove old
-            region_unicode = u'\n'.join(line.get_TextEquiv()[0].Unicode if line.get_TextEquiv() else u'' for line in lines)
+            region_unicode = u'\n'.join(line.get_TextEquiv()[0].Unicode if line.get_TextEquiv() else '' for line in lines)
             region.set_TextEquiv([TextEquivType(Unicode=region_unicode)]) # remove old
 
 def _page_get_tokenisation_problems(level, pcgts):
@@ -347,7 +342,7 @@ def _add_space(graph, start_node, space, last_start_node, problem, textequivs):
     # - the element is first of its kind (i.e. must not start with white space anyway)
     if (textequivs and textequivs[0].Unicode and problem and
         _repair_tokenisation(problem.actual,
-                             u''.join(map(lambda x: x['alternatives'][0].Unicode, _get_edges(graph, last_start_node))),
+                             ''.join(map(lambda x: x['alternatives'][0].Unicode, _get_edges(graph, last_start_node))),
                              textequivs[0].Unicode)):
         pass # skip all rules for concatenation joins
     else: # joining space required for LM input here?
