@@ -10,7 +10,7 @@ from ocrd_tesserocr.recognize import TesserocrRecognize
 from ocrd_keraslm.wrapper import KerasRate
 
 WORKSPACE_DIR = '/tmp/pyocrd-test-ocrd_keraslm'
-PWD = os.path.dirname(os.path.realpath(__file__))
+MODEL = os.getenv('OCRD_KERASLM_MODEL', 'model_dta_full.h5')
 
 class TestKerasRate(TestCase):
 
@@ -33,7 +33,7 @@ class TestKerasRate(TestCase):
             output_file_grp='OCR-D-LM-WORD',
             parameter={'textequiv_level': 'word',
                        'alternative_decoding': False,
-                       'model_file': PWD + '/../model_dta_test.h5'}
+                       'model_file': MODEL}
             ).process()
         workspace.save_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-WORD'):
@@ -63,7 +63,7 @@ class TestKerasRate(TestCase):
             parameter={'textequiv_level': 'glyph',
                        'alternative_decoding': True,
                        'beam_width': 10, # not too slow
-                       'model_file': PWD + '/../model_dta_test.h5'}
+                       'model_file': MODEL}
             ).process()
         workspace.save_mets()
         for file in workspace.mets.find_files(fileGrp='OCR-D-LM-GLYPH'):

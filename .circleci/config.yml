@@ -20,23 +20,21 @@ jobs:
     environment:
       PIP: pip3
       PYTHON: python3
-      # as long as ocrd/tesserocr is built with Tesseract from PPA (but does not export this variable):
-      TESSDATA_PREFIX: /usr/share/tesseract-ocr/4.00/tessdata
     steps:
       - run: apt-get update && apt-get install -y --no-install-recommends make wget unzip xsltproc
       - checkout
       - run: make nvidia-tensorflow
       - run: make deps
       - run: make install
-      - run: ocrd resmgr download -n
-          https://github.com/tesseract-ocr/tessdata/raw/4.1.0/deu_frak.traineddata
-          ocrd-tesserocr-recognize deu-frak.traineddata
       - run: make deps-test
       # restore trained model from previous run
       # (change name of the key here when model ABI changes)
       - restore_cache:
           key: v0.3-model_dta_test
-      - run: make test |& tee test.log
+      # test with the (cached) test model
+      - run: make test TEST_TRAINING=1 |& tee test.log
+      # test with the prebuilt DTA model
+      - run: make test |& tee -a test.log
       - store_artifacts:
           path: test.log
       # store trained model for next run

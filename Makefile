@@ -28,8 +28,10 @@ help:
 deps:
 	$(PIP) install -r requirements.txt
 
+DEU_FRAK_URL = https://github.com/tesseract-ocr/tessdata/raw/4.1.0/deu_frak.traineddata
 deps-test:
 	$(PIP) install -r requirements_test.txt
+	ocrd resmgr download -n $(DEU_FRAK_URL) ocrd-tesserocr-recognize deu-frak.traineddata
 
 nvidia-tensorflow:
 	if $(PYTHON) -c 'import sys; print("%u.%u" % (sys.version_info.major, sys.version_info.minor))' | fgrep 3.8 && \
@@ -60,8 +62,16 @@ docker:
 
 export TF_CPP_MIN_LOG_LEVEL = 1
 test: test/assets
-	test -f model_dta_test.h5 || keraslm-rate train -m model_dta_test.h5 test/assets/*.txt
-	keraslm-rate test -m model_dta_test.h5 test/assets/*.txt
+ifeq ($(TEST_TRAINING),)
+test: export OCRD_KERASLM_MODEL = model_dta_full.h5
+test:
+	ocrd resmgr download ocrd-keraslm-rate $(OCRD_KERASLM_MODEL)
+else
+test: export OCRD_KERASLM_MODEL = $(CURDIR)/model_dta_test.h5
+test:
+	test -f $(OCRD_KERASLM_MODEL) || keraslm-rate train -m $(OCRD_KERASLM_MODEL) test/assets/*.txt
+	keraslm-rate test -m $(OCRD_KERASLM_MODEL) test/assets/*.txt
+endif
 	$(PYTHON) -m pytest test $(PYTEST_ARGS)
 
 # prepare test assets
