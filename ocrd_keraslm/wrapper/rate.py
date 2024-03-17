@@ -59,9 +59,39 @@ class KerasRate(Processor):
         self.rater.logger.debug("Loaded model_file '%s'", model)
     
     def process(self):
-        """Rates textual annotation of PAGE input files, producing output files with LM scores (and choices).
+        """Rate text with the language model, either for scoring or finding the best path across alternatives.
         
-        ... explain incremental page-wise processing here ...
+        Open and deserialise PAGE input files, then iterate over the segment hierarchy
+        down to the requested `textequiv_level`, making sequences of first TextEquiv objects
+        (if `alternative_decoding` is false), or of lists of all TextEquiv objects (otherwise)
+        as a linear graph for input to the LM. If the level is above glyph, then insert
+        artificial whitespace TextEquiv where implicit tokenisation rules require it.
+        
+        Next, if `alternative_decoding` is false, then pass the concatenated string of the
+        page text to the LM and map the returned sequence of probabilities to the substrings
+        in the input TextEquiv. For each TextEquiv, calculate the average character probability
+        (LM score) and combine that with the input confidence (OCR score) by applying `lm_weight`.
+        Assign the resulting probability as new confidence to the TextEquiv, and ensure no other
+        TextEquiv remain on the segment. Finally, calculate the overall average LM probability, 
+        and the character and segment-level perplexity, and print it on the logger.
+        
+        Otherwise (i.e with `alternative_decoding=true`), search for the best paths through
+        the input graph of the page (with TextEquiv string alternatives as edges) by applying
+        the LM successively via beam search using `beam_width` (keeping a traceback of LM
+        state history at each node, passing and updating LM state explicitly). As in the above
+        trivial case without `alternative_decoding`, then combine LM scores weighted by `lm_weight`
+        with input confidence on the graph's edges. Also, prune worst paths and apply LM state
+        history clustering to avoid expanding all possible combinations. Finally, look into the
+        current best overall path, traversing back to the last node of the previous page's graph.
+        Lock into that node by removing all current paths that do not derive from it, and making
+        its history path the final decision for the previous page: Apply that path by removing
+        all but the chosen TextEquiv alternatives, assigning the resulting confidences, and
+        making the levels above `textequiv_level` consistent with that textual result (via
+        concatenation joined by whitespace). Also, calculate the overall average LM probability,
+        and the character and segment-level perplexity, and print it on the logger. Moreover,
+        at the last page at the end of the document, lock into the current best path analogously.
+        
+        Produce new output files by serialising the resulting hierarchy for each page.
         """
         assert_file_grp_cardinality(self.input_file_grp, 1)
         assert_file_grp_cardinality(self.output_file_grp, 1)
