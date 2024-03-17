@@ -5,7 +5,7 @@ from unittest import TestCase, main
 from ocrd.resolver import Resolver
 from ocrd_models.ocrd_page import to_xml
 from ocrd_modelfactory import page_from_file
-from ocrd_utils import MIMETYPE_PAGE
+from ocrd_utils import MIMETYPE_PAGE, initLogging
 from ocrd_tesserocr.recognize import TesserocrRecognize
 from ocrd_keraslm.wrapper import KerasRate
 
@@ -18,6 +18,7 @@ class TestKerasRate(TestCase):
         if os.path.exists(WORKSPACE_DIR):
             shutil.rmtree(WORKSPACE_DIR)
         os.makedirs(WORKSPACE_DIR)
+        initLogging()
 
     def runTest(self):
         resolver = Resolver()
