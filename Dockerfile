@@ -1,4 +1,5 @@
-FROM ocrd/core-cuda:v2.62.0 AS base
+ARG DOCKER_BASE_IMAGE
+FROM $DOCKER_BASE_IMAGE
 ARG VCS_REF
 ARG BUILD_DATE
 LABEL \
@@ -8,7 +9,7 @@ LABEL \
     org.label-schema.build-date=$BUILD_DATE
 
 SHELL ["/bin/bash", "-c"]
-WORKDIR /build
+WORKDIR /build/ocrd_keraslm
 
 COPY setup.py .
 COPY ocrd-tool.json .
@@ -23,7 +24,7 @@ RUN pip install imageio==2.14.1 "tifffile<2022"
 # - preempt conflict over numpy between h5py and tensorflow
 RUN pip install "numpy<1.24"
 RUN pip install .
-RUN rm -fr /build
+RUN rm -fr /build/ocrd_keraslm
 
 WORKDIR /data
 VOLUME ["/data"]

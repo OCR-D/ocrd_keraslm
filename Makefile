@@ -1,7 +1,8 @@
 SHELL = /bin/bash
 PYTHON ?= python
 PIP ?= pip
-TAG ?= ocrd/keraslm
+DOCKER_BASE_IMAGE ?= docker.io/ocrd/core-cuda:v2.69.0
+DOCKER_TAG ?= ocrd/keraslm
 
 # BEGIN-EVAL makefile-parser --make-help Makefile
 
@@ -56,7 +57,8 @@ install:
 
 docker:
 	docker build \
-	-t $(TAG) \
+	-t $(DOCKER_TAG) \
+	--build-arg DOCKER_BASE_IMAGE=$(DOCKER_BASE_IMAGE) \
 	--build-arg VCS_REF=$(git rev-parse --short HEAD) \
 	--build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") .
 
@@ -87,4 +89,4 @@ repo/assets: always-update
 clean:
 	$(RM) -r test/assets model_dta_test.h5
 
-.PHONY: help deps deps-test install test clean always-update nvidia-tensorflow
+.PHONY: help deps deps-test install test clean docker always-update nvidia-tensorflow
