@@ -79,7 +79,7 @@ endif
 # prepare test assets
 test/assets: repo/assets
 	mkdir -p $@
-	ocrd workspace -d $@/kant_aufklaerung_1784 clone $</data/kant_aufklaerung_1784/data/mets.xml --download
+	cp -r -t $@ repo/assets/data/*
 	bash test/prepare_gt.bash $@
 
 repo/assets: always-update
