@@ -1,6 +1,7 @@
 {
   "git_url": "https://github.com/OCR-D/ocrd_keraslm",
-  "version": "0.4.3",
+  "dockerhub": "ocrd/keraslm",
+  "version": "0.5.0",
   "tools": {
     "ocrd-keraslm-rate": {
       "executable": "ocrd-keraslm-rate",
