@@ -1,5 +1,5 @@
-ocrd >= 2.13.1
-keras == 2.3.*
+ocrd >= 3.3.0
+keras == 2.3.* # old multi-backend Keras, still not tf.keras
 # for tensorflow-gpu==1.15 nv (py37+py38), we need < 1.24, >= 1.22 
 # for tensorflow-gpu==1.15 from PyPI (py36+py37), we need < 1.19
 # (but 3.7 is gone now, so hold at 1.23)
