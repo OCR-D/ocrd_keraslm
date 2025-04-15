@@ -23,7 +23,7 @@ help:
 	@echo "  Variables"
 	@echo "    PYTHON       name of the Python binary [$(PYTHON)]"
 	@echo "    PIP          name of the Python packager [$(PIP)]"
-	@echo "    TAG          name of the Docker image [$(DOCKER_TAG)]"
+	@echo "    DOCKER_TAG   name of the Docker image [$(DOCKER_TAG)]"
 	@echo "    PYTEST_ARGS  extra runtime arguments for test [$(PYTEST_ARGS)]"
 	@echo ""
 
@@ -84,7 +84,7 @@ test:
 	test -f $(OCRD_KERASLM_MODEL) || keraslm-rate train -m $(OCRD_KERASLM_MODEL) test/assets/*.txt
 	keraslm-rate test -m $(OCRD_KERASLM_MODEL) test/assets/*.txt
 endif
-	$(PYTHON) -m pytest test $(PYTEST_ARGS)
+	$(PYTHON) -m pytest test --durations=0 $(PYTEST_ARGS)
 
 # prepare test assets
 test/assets: repo/assets

@@ -22,6 +22,7 @@ jobs:
       PIP: pip3
       PYTHON: python3
     steps:
+      - run: apt-get update && apt-get install -y --no-install-recommends make wget
       - checkout
       - run: make -C /build/core deps-cuda deps-tf1
       - run: make deps
