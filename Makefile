@@ -1,7 +1,7 @@
 SHELL = /bin/bash
 PYTHON ?= python
 PIP ?= pip
-DOCKER_BASE_IMAGE ?= docker.io/ocrd/core-cuda:v2.69.0
+DOCKER_BASE_IMAGE ?= docker.io/ocrd/core-cuda-tf1:v3.3.0
 DOCKER_TAG ?= ocrd/keraslm
 PYTEST_ARGS ?= -vv
 
