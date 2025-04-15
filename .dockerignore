@@ -1,0 +1,8 @@
+test
+repo
+dist
+build
+*.egg-info
+*.h5
+venv*
+env*
