@@ -24,6 +24,7 @@ jobs:
     steps:
       - run: apt-get update && apt-get install -y --no-install-recommends make wget
       - checkout
+      - run: mkdir /include
       - run: make -C /build/core deps-cuda deps-tf1
       - run: make deps
       - run: make install
