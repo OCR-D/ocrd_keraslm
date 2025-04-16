@@ -44,8 +44,10 @@ def test_scoring(processor_kwargs, caplog):
     messages = [logrec.message for logrec in caplog.records]
     assert "are off by" not in messages
     assert len([msg for msg in messages if msg.startswith("Scoring text in page")]) == n_pages
-    assert all(float(dict([v.strip() for v in p.split(':')] for p in msg.split(','))['char ppl']) < 6.0
-               for msg in messages if msg.startswith("avg:"))
+    ppls = [float(dict([v.strip() for v in p.split(':')] for p in msg.split(','))['char ppl'])
+            for msg in messages if msg.startswith("avg:")]
+    refq = 6.0 if MODEL.endswith('full.h5') else 8.0
+    assert all(ppl < refq for ppl in ppls)
 
 def test_decoding(processor_kwargs, caplog):
     """rate and viterbi-decode all text alternatives on the glyph level"""
@@ -94,5 +96,7 @@ def test_decoding(processor_kwargs, caplog):
     assert "AssertionError" not in messages
     assert len([msg for msg in messages if msg.startswith("Scoring text in page")]) == n_pages
     #assert len([msg for msg in messages if msg.endswith("existing paths") and not msg.endswith("0 existing paths")]) > 0
-    assert all(float(dict([v.strip() for v in p.split(':')] for p in msg.split(','))['char ppl']) < 3.5
-               for msg in messages if msg.startswith("avg:"))
+    ppls = [float(dict([v.strip() for v in p.split(':')] for p in msg.split(','))['char ppl'])
+            for msg in messages if msg.startswith("avg:")]
+    refq = 3.5 if MODEL.endswith('full.h5') else 5.0
+    assert all(ppl < refq for ppl in ppls)
