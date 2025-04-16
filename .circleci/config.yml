@@ -3,27 +3,29 @@ jobs:
 
   build-python3:
     docker:
-      - image: ocrd/core
+      - image: ocrd/core-cuda-tf1
     environment:
       PIP: pip3
       PYTHON: python3
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends ssh
       - checkout
-      - run: make nvidia-tensorflow
       - run: make deps
       - run: make install
+      - run: make build
   
   test-python3:
     docker:
+      # for the CI we need ocrd-tesserocr-recognize
+      # (it is easier to install nvidia-tensorflow than build Tesseract)
       - image: ocrd/tesserocr
     environment:
       PIP: pip3
       PYTHON: python3
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends make wget unzip xsltproc
+      - run: apt-get update && apt-get install -y --no-install-recommends make wget
       - checkout
-      - run: make nvidia-tensorflow
+      - run: mkdir /include
+      - run: make -C /build/core deps-cuda deps-tf1
       - run: make deps
       - run: make install
       - run: make deps-test
@@ -48,7 +50,7 @@ jobs:
 
   deploy-docker:
     docker:
-      - image: circleci/buildpack-deps:stretch
+      - image: circleci/buildpack-deps
     steps:
       - checkout
       - setup_remote_docker: # https://circleci.com/docs/2.0/building-docker-images/

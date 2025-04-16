@@ -1,8 +1,9 @@
 SHELL = /bin/bash
 PYTHON ?= python
 PIP ?= pip
-DOCKER_BASE_IMAGE ?= docker.io/ocrd/core-cuda:v2.69.0
+DOCKER_BASE_IMAGE ?= docker.io/ocrd/core-cuda-tf1:v3.3.0
 DOCKER_TAG ?= ocrd/keraslm
+PYTEST_ARGS ?= -vv
 
 # BEGIN-EVAL makefile-parser --make-help Makefile
 
@@ -12,16 +13,18 @@ help:
 	@echo ""
 	@echo "    deps         pip install -r requirements.txt"
 	@echo "    install      pip install ."
+	@echo "    install-dev  pip install -e ."
 	@echo "    deps-test    pip install -r requirements_test.txt"
 	@echo "    test         python -m pytest test"
 	@echo "    test/assets  prepare test assets"
+	@echo "    build        python -m build ."
 	@echo "    docker       build Docker image"
 	@echo ""
 	@echo "  Variables"
-	@echo "    PYTHON       name of the Python binary. Default: $(PYTHON)"
-	@echo "    PIP          name of the Python packager. Default: $(PIP)"
-	@echo "    TAG          name of the Docker image. Default: $(TAG)"
-	@echo "    PYTEST_ARGS  pytest args. Set to '-s' to see log output during test execution, '--verbose' to see individual tests. Default: '$(PYTEST_ARGS)'"
+	@echo "    PYTHON       name of the Python binary [$(PYTHON)]"
+	@echo "    PIP          name of the Python packager [$(PIP)]"
+	@echo "    DOCKER_TAG   name of the Docker image [$(DOCKER_TAG)]"
+	@echo "    PYTEST_ARGS  extra runtime arguments for test [$(PYTEST_ARGS)]"
 	@echo ""
 
 # END-EVAL
@@ -55,6 +58,13 @@ nvidia-tensorflow:
 install:
 	$(PIP) install .
 
+install-dev:
+	$(PIP) install -e .
+
+build:
+	$(PIP) install build wheel
+	$(PYTHON) -m build .
+
 docker:
 	docker build \
 	-t $(DOCKER_TAG) \
@@ -74,7 +84,7 @@ test:
 	test -f $(OCRD_KERASLM_MODEL) || keraslm-rate train -m $(OCRD_KERASLM_MODEL) test/assets/*.txt
 	keraslm-rate test -m $(OCRD_KERASLM_MODEL) test/assets/*.txt
 endif
-	$(PYTHON) -m pytest test $(PYTEST_ARGS)
+	$(PYTHON) -m pytest test --durations=0 $(PYTEST_ARGS)
 
 # prepare test assets
 test/assets: repo/assets
@@ -89,4 +99,4 @@ repo/assets: always-update
 clean:
 	$(RM) -r test/assets model_dta_test.h5
 
-.PHONY: help deps deps-test install test clean docker always-update nvidia-tensorflow
+.PHONY: help deps deps-test install install-dev build test clean docker always-update nvidia-tensorflow
