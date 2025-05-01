@@ -1,8 +1,9 @@
 SHELL = /bin/bash
 PYTHON ?= python
 PIP ?= pip
-DOCKER_BASE_IMAGE ?= docker.io/ocrd/core-cuda-tf1:v3.3.0
+DOCKER_BASE_IMAGE ?= docker.io/ocrd/core-cuda-tf1:latest
 DOCKER_TAG ?= ocrd/keraslm
+DOCKER ?= docker
 PYTEST_ARGS ?= -vv
 
 # BEGIN-EVAL makefile-parser --make-help Makefile
@@ -66,7 +67,7 @@ build:
 	$(PYTHON) -m build .
 
 docker:
-	docker build \
+	$(DOCKER) build \
 	-t $(DOCKER_TAG) \
 	--build-arg DOCKER_BASE_IMAGE=$(DOCKER_BASE_IMAGE) \
 	--build-arg VCS_REF=$(git rev-parse --short HEAD) \
