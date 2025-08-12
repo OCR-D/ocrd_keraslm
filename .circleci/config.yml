@@ -32,7 +32,7 @@ jobs:
       # restore trained model from previous run
       # (change name of the key here when model ABI changes)
       - restore_cache:
-          key: v0.3-model_dta_test
+          key: v0.5-model_dta_test
       # test with the (cached) test model
       - run: make test TEST_TRAINING=1 |& tee test.log
       # test with the prebuilt DTA model
@@ -42,7 +42,7 @@ jobs:
       # store trained model for next run
       # (change name of the key here when model ABI changes)
       - save_cache:
-          key: v0.3-model_dta_test
+          key: v0.5-model_dta_test
           paths:
             - model_dta_test.h5
     # The resource_class feature allows configuring CPU and RAM resources for each job. Different resource classes are available for different executors. https://circleci.com/docs/2.0/configuration-reference/#resourceclass
