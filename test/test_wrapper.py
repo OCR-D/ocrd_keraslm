@@ -47,7 +47,7 @@ def test_scoring(processor_kwargs, caplog):
     ppls = [float(dict([v.strip() for v in p.split(':')] for p in msg.split(','))['char ppl'])
             for msg in messages if msg.startswith("avg:")]
     refq = 6.0 if MODEL.endswith('full.h5') else 11.5
-    assert all(ppl < refq for ppl in ppls)
+    assert all(ppl < refq for ppl in ppls), ppls
 
 def test_decoding(processor_kwargs, caplog):
     """rate and viterbi-decode all text alternatives on the glyph level"""
