@@ -4,6 +4,39 @@ Versioned according to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## [0.5.1] - 2025-08-13
+
+Changed:
+
+ * wrapper.rate: when projecting from `textequiv_level` upwards,
+   respect recursive ReadingOrder / `@textLineOrder` / `@readingDirection`,
+   and also update `@conf`
+
+## [0.5.0] - 2025-04-16
+
+Fixed:
+
+ * train: continuing from checkpoint
+
+Added:
+
+ * train: allow passing single file for `val_data`
+ * train: save training history and metrics to model
+ * wrapper.rate: reference `model_dta_full.h5` in ocrd-tool.json
+ * docker: labels and envvars according to spec
+ * docker: preinstall `ocrd-all-tool.json`
+
+Changed:
+
+ * wrapper.rate: use normal `resolve_resource` for model file
+ * wrapper.rate: improve docstring/help and readme
+ * wrapper.rate: adapt to OCR-D v3
+ * test: allow running with published model instead of training from scratch
+ * test: improve, update, migrate unittest → pytest
+ * test: split scoring and decoding, add assertions, add modes w/ METS Server / page worker
+ * docker: rebase on ocrd/core-cuda-tf1 v3
+ * setup.py → pyproject.toml, versioning based on ocrd-tool.json
+
 ## [0.4.3] - 2024-03-11
 
 Changed:
@@ -69,6 +102,8 @@ Fixed:
 
 
 <!-- link-labels -->
+[0.5.1]: ../../compare/v0.5.0...v0.5.1
+[0.5.0]: ../../compare/v0.4.3...v0.5.0
 [0.4.3]: ../../compare/v0.4.2...v0.4.3
 [0.4.2]: ../../compare/v0.4.1...v0.4.2
 [0.4.1]: ../../compare/v0.4.0...v0.4.1
